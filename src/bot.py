@@ -1207,6 +1207,34 @@ class KnowledgeBot:
                 del self._email_state[user_id]
             await query.edit_message_text("📧 Email cancelled.")
 
+    def _markdown_to_html(self, text: str) -> str:
+        """Convert markdown-style text to HTML for email formatting."""
+        import html as html_lib
+
+        # Escape HTML entities first
+        text = html_lib.escape(text)
+
+        # Convert markdown to HTML
+        # Bold: **text** -> <strong>text</strong>
+        text = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', text)
+
+        # Italic: _text_ -> <em>text</em> (but not in the middle of words)
+        text = re.sub(r'(?<![a-zA-Z])_([^_]+)_(?![a-zA-Z])', r'<em>\1</em>', text)
+
+        # Line breaks
+        text = text.replace('\n\n', '</p><p>')
+        text = text.replace('\n', '<br>')
+
+        # Wrap in paragraphs and add email styling
+        html = f"""
+        <html>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <p>{text}</p>
+        </body>
+        </html>
+        """
+        return html
+
     async def _send_email(self, to_email: str, subject: str, body: str) -> bool:
         """Send an email with the podcast summary.
 
@@ -1218,15 +1246,18 @@ class KnowledgeBot:
             return False
 
         try:
+            # Convert markdown to HTML for better formatting
+            html_body = self._markdown_to_html(body)
+
             if self.config.email.provider == "resend":
-                return await self._send_email_resend(to_email, subject, body)
+                return await self._send_email_resend(to_email, subject, body, html_body)
             else:
-                return await self._send_email_smtp(to_email, subject, body)
+                return await self._send_email_smtp(to_email, subject, body, html_body)
         except Exception as e:
             logger.exception(f"Error sending email: {e}")
             return False
 
-    async def _send_email_resend(self, to_email: str, subject: str, body: str) -> bool:
+    async def _send_email_resend(self, to_email: str, subject: str, text_body: str, html_body: str) -> bool:
         """Send email via Resend API."""
         import resend
 
@@ -1236,22 +1267,27 @@ class KnowledgeBot:
             "from": self.config.email.from_email,
             "to": [to_email],
             "subject": subject,
-            "text": body,
+            "text": text_body,
+            "html": html_body,
         }
 
         resend.Emails.send(params)
         return True
 
-    async def _send_email_smtp(self, to_email: str, subject: str, body: str) -> bool:
+    async def _send_email_smtp(self, to_email: str, subject: str, text_body: str, html_body: str) -> bool:
         """Send email via SMTP."""
         msg = MIMEMultipart('alternative')
         msg['Subject'] = subject
         msg['From'] = self.config.email.sender_email
         msg['To'] = to_email
 
-        # Plain text version
-        text_part = MIMEText(body, 'plain')
+        # Plain text version (fallback)
+        text_part = MIMEText(text_body, 'plain')
         msg.attach(text_part)
+
+        # HTML version (preferred)
+        html_part = MIMEText(html_body, 'html')
+        msg.attach(html_part)
 
         # Connect and send
         with smtplib.SMTP(self.config.email.smtp_server, self.config.email.smtp_port) as server:
