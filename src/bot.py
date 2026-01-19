@@ -1079,30 +1079,58 @@ class KnowledgeBot:
                 await query.message.reply_text("❌ No summary selected.")
 
     async def _send_email(self, to_email: str, subject: str, body: str) -> bool:
-        """Send an email with the podcast summary."""
+        """Send an email with the podcast summary.
+
+        Supports two providers:
+        - resend: Easy API-based email (recommended)
+        - smtp: Traditional SMTP (Gmail, etc.)
+        """
         if not self.config.email.enabled:
             return False
 
         try:
-            msg = MIMEMultipart('alternative')
-            msg['Subject'] = subject
-            msg['From'] = self.config.email.sender_email
-            msg['To'] = to_email
-
-            # Plain text version
-            text_part = MIMEText(body, 'plain')
-            msg.attach(text_part)
-
-            # Connect and send
-            with smtplib.SMTP(self.config.email.smtp_server, self.config.email.smtp_port) as server:
-                server.starttls()
-                server.login(self.config.email.sender_email, self.config.email.sender_password)
-                server.sendmail(self.config.email.sender_email, to_email, msg.as_string())
-
-            return True
+            if self.config.email.provider == "resend":
+                return await self._send_email_resend(to_email, subject, body)
+            else:
+                return await self._send_email_smtp(to_email, subject, body)
         except Exception as e:
             logger.exception(f"Error sending email: {e}")
             return False
+
+    async def _send_email_resend(self, to_email: str, subject: str, body: str) -> bool:
+        """Send email via Resend API."""
+        import resend
+
+        resend.api_key = self.config.email.resend_api_key
+
+        params = {
+            "from": self.config.email.from_email,
+            "to": [to_email],
+            "subject": subject,
+            "text": body,
+        }
+
+        resend.Emails.send(params)
+        return True
+
+    async def _send_email_smtp(self, to_email: str, subject: str, body: str) -> bool:
+        """Send email via SMTP."""
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = self.config.email.sender_email
+        msg['To'] = to_email
+
+        # Plain text version
+        text_part = MIMEText(body, 'plain')
+        msg.attach(text_part)
+
+        # Connect and send
+        with smtplib.SMTP(self.config.email.smtp_server, self.config.email.smtp_port) as server:
+            server.starttls()
+            server.login(self.config.email.sender_email, self.config.email.sender_password)
+            server.sendmail(self.config.email.sender_email, to_email, msg.as_string())
+
+        return True
 
     async def _handle_podcast_feedback_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         """Handle podcast feedback input (standalone mode). Returns True if handled."""

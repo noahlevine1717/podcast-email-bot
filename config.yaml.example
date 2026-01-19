@@ -41,8 +41,17 @@ spotify:
   client_secret: ""
 
 # Optional: Email settings for sending summaries
+# Two options: "resend" (recommended, easier) or "smtp" (Gmail, etc.)
 email:
   enabled: false
+  provider: "resend"  # "resend" or "smtp"
+
+  # Option 1: Resend (Recommended - just need API key)
+  # Sign up free at https://resend.com, get API key, done!
+  resend_api_key: ""
+  from_email: "Podcast Bot <onboarding@resend.dev>"  # Works with free tier
+
+  # Option 2: SMTP (Gmail, etc.) - more complex setup
   smtp_server: "smtp.gmail.com"
   smtp_port: 587
   sender_email: ""

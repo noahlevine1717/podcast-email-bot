@@ -52,9 +52,21 @@ class SpotifyConfig(BaseModel):
 
 
 class EmailConfig(BaseModel):
-    """Optional email configuration for sending summaries."""
+    """Optional email configuration for sending summaries.
+
+    Supports two providers:
+    - resend: Easy setup, just need API key (recommended)
+    - smtp: Traditional SMTP (Gmail, etc.)
+    """
 
     enabled: bool = False
+    provider: Literal["resend", "smtp"] = "resend"
+
+    # Resend configuration (recommended - just need API key)
+    resend_api_key: str = ""
+    from_email: str = "Podcast Bot <onboarding@resend.dev>"  # Default works with Resend free tier
+
+    # SMTP configuration (alternative)
     smtp_server: str = "smtp.gmail.com"
     smtp_port: int = 587
     sender_email: str = ""

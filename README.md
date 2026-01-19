@@ -100,24 +100,37 @@ whisper:
   model_size: "base"  # Options: tiny, base, small, medium, large-v3
   device: "auto"      # Options: auto, cpu, cuda
 
+# Email via Resend (recommended - easiest setup)
 email:
   enabled: true
-  smtp_server: "smtp.gmail.com"
-  smtp_port: 587
-  sender_email: "your-email@gmail.com"
-  sender_password: "your-app-password"  # Use Gmail App Password, not regular password
+  provider: "resend"
+  resend_api_key: "re_xxxxx"  # Get from resend.com
 
 digest:
   time: "20:00"
   timezone: "America/Los_Angeles"
 ```
 
-#### Gmail App Password (for email feature)
-1. Go to [Google Account Security](https://myaccount.google.com/security)
-2. Enable 2-Factor Authentication if not already enabled
-3. Go to App Passwords (search for it in account settings)
-4. Generate a new app password for "Mail"
-5. Use this 16-character password in `sender_password`
+#### Email Setup (Resend - Recommended)
+1. Sign up free at [resend.com](https://resend.com)
+2. Go to API Keys and create a new key
+3. Add to config: `resend_api_key: "re_xxxxx"`
+4. Set `enabled: true`
+
+That's it! The default `from_email` works with Resend's free tier.
+
+#### Email Setup (Gmail - Alternative)
+If you prefer Gmail SMTP:
+```yaml
+email:
+  enabled: true
+  provider: "smtp"
+  smtp_server: "smtp.gmail.com"
+  smtp_port: 587
+  sender_email: "your-email@gmail.com"
+  sender_password: "your-app-password"
+```
+Note: Gmail requires an [App Password](https://myaccount.google.com/apppasswords) (not your regular password).
 
 ## Commands
 
