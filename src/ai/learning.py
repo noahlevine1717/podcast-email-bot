@@ -42,6 +42,9 @@ class UserPreferences:
     # Learned patterns from feedback
     common_feedback_patterns: list[str] = field(default_factory=list)
 
+    # Email preference
+    default_email: str = ""
+
     # Stats
     total_podcasts_processed: int = 0
     total_edits_requested: int = 0
@@ -283,3 +286,12 @@ class LearningSystem:
         """Reset all learned preferences (keep history)."""
         self.preferences = UserPreferences()
         self._save()
+
+    def set_default_email(self, email: str) -> None:
+        """Set the default email address for sending summaries."""
+        self.preferences.default_email = email
+        self._save()
+
+    def get_default_email(self) -> str:
+        """Get the stored default email address."""
+        return self.preferences.default_email

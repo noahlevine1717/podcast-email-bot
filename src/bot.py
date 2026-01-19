@@ -1115,7 +1115,7 @@ class KnowledgeBot:
             if not self.config.email.enabled:
                 await query.message.reply_text(
                     "📧 Email is not configured.\n\n"
-                    "To enable email, update `config.yaml` with your SMTP settings."
+                    "To enable email, update `config.yaml` with your Resend API key."
                 )
                 return
 
@@ -1126,15 +1126,86 @@ class KnowledgeBot:
                 self._email_state[user_id] = saved_info
 
                 await query.edit_message_reply_markup(reply_markup=None)
-                await query.message.reply_text(
-                    "📧 **Send as Email**\n\n"
-                    "Reply with the email address to send to:\n\n"
-                    "_Example: `someone@example.com`_\n\n"
-                    "Or type `/cancel` to go back.",
-                    parse_mode="Markdown",
-                )
+
+                # Check if we have a saved default email
+                default_email = self.learning.get_default_email()
+                if default_email:
+                    # Offer quick send to saved email
+                    keyboard = [
+                        [InlineKeyboardButton(f"📧 Send to {default_email}", callback_data="email_quick_send")],
+                        [InlineKeyboardButton("📝 Use different email", callback_data="email_enter_new")],
+                        [InlineKeyboardButton("❌ Cancel", callback_data="email_cancel")],
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await query.message.reply_text(
+                        "📧 **Send as Email**\n\n"
+                        f"Send to your saved email?",
+                        parse_mode="Markdown",
+                        reply_markup=reply_markup,
+                    )
+                else:
+                    # First time - ask for email with Resend explanation
+                    resend_note = ""
+                    if self.config.email.provider == "resend":
+                        resend_note = (
+                            "\n\n⚠️ **Resend free tier:** You can only send to the email "
+                            "you used to sign up for Resend. This will be saved for future use."
+                        )
+                    await query.message.reply_text(
+                        "📧 **Send as Email**\n\n"
+                        f"Reply with your email address:{resend_note}\n\n"
+                        "Or type `/cancel` to go back.",
+                        parse_mode="Markdown",
+                    )
             else:
                 await query.message.reply_text("❌ No summary selected.")
+
+        elif query.data == "email_quick_send":
+            # Quick send to saved email
+            default_email = self.learning.get_default_email()
+            if not default_email:
+                await query.message.reply_text("❌ No saved email found.")
+                return
+
+            saved_info = self._email_state.get(user_id) if hasattr(self, '_email_state') else None
+            if not saved_info:
+                await query.message.reply_text("❌ Session expired. Please try again.")
+                return
+
+            await query.edit_message_text("📧 Sending...")
+
+            summary_obj = self.summary_storage.get_summary(saved_info['id'])
+            if summary_obj:
+                subject = f"Podcast Summary: {summary_obj.title}"
+                success = await self._send_email(default_email, subject, summary_obj.email_content)
+                if success:
+                    await query.edit_message_text(f"✅ Email sent to {default_email}!")
+                else:
+                    await query.edit_message_text("❌ Failed to send email. Check your email configuration.")
+
+            # Clean up state
+            if hasattr(self, '_email_state') and user_id in self._email_state:
+                del self._email_state[user_id]
+
+        elif query.data == "email_enter_new":
+            # User wants to enter a different email
+            resend_note = ""
+            if self.config.email.provider == "resend":
+                resend_note = (
+                    "\n\n⚠️ **Resend free tier:** You can only send to the email "
+                    "you used to sign up for Resend."
+                )
+            await query.edit_message_text(
+                "📧 **Send as Email**\n\n"
+                f"Reply with your email address:{resend_note}\n\n"
+                "Or type `/cancel` to go back.",
+                parse_mode="Markdown",
+            )
+
+        elif query.data == "email_cancel":
+            if hasattr(self, '_email_state') and user_id in self._email_state:
+                del self._email_state[user_id]
+            await query.edit_message_text("📧 Email cancelled.")
 
     async def _send_email(self, to_email: str, subject: str, body: str) -> bool:
         """Send an email with the podcast summary.
@@ -1410,7 +1481,13 @@ class KnowledgeBot:
         success = await self._send_email(text, subject, summary_obj.email_content)
 
         if success:
-            await update.message.reply_text(f"✅ Email sent to `{text}`!", parse_mode="Markdown")
+            # Save the email for future quick sends
+            self.learning.set_default_email(text)
+            await update.message.reply_text(
+                f"✅ Email sent to `{text}`!\n\n"
+                "_Your email has been saved for quick sending next time._",
+                parse_mode="Markdown",
+            )
         else:
             await update.message.reply_text(
                 "❌ Failed to send email. Check your email configuration in `config.yaml`.",
