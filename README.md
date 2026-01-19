@@ -35,7 +35,7 @@ A Telegram bot that transforms podcast episodes into professional email-style su
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/noahlevine1717/podcast-email-bot.git
+   git clone <repository-url>
    cd podcast-email-bot
    ```
 
