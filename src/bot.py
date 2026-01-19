@@ -114,15 +114,14 @@ class KnowledgeBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""
         await update.message.reply_text(
-            "👋 Welcome to Knowledge Bot!\n\n"
-            "I help you capture key learnings from podcasts.\n\n"
+            "👋 Welcome to Podcast Email Bot!\n\n"
+            "I turn podcasts into professional email summaries.\n\n"
             "**Commands:**\n"
             "/podcast <url> - Process and summarize a podcast\n"
-            "/lookup - Browse your past podcast summaries\n"
-            "/note <text> - Quick capture a thought\n"
-            "/insight <text> - Tag something as a key insight\n"
-            "/status - Check processing status\n\n"
-            "**Supported podcasts:** Spotify, Apple Podcasts, RSS feeds\n\n"
+            "/lookup - Browse your saved summaries\n"
+            "/stats - View learning progress\n"
+            "/help - Full command list\n\n"
+            "**Supported:** Spotify, Apple Podcasts, RSS feeds\n\n"
             "Just paste a podcast link to get started!",
             parse_mode="Markdown",
         )
@@ -139,13 +138,9 @@ class KnowledgeBot:
             "• **Interactive** - Add your own notes while it transcribes, then AI enhances them\n\n"
             "**Browse Past Summaries:**\n"
             "• `/lookup` - View your previous podcast summaries\n\n"
-            "**Quick Notes:**\n"
-            "• `/note <text>` - Capture a quick thought\n"
-            "• `/insight <text>` - Mark something as a key insight\n\n"
             "**Other:**\n"
             "• `/status` - Check processing queue\n"
-            "• `/stats` - View learning progress\n"
-            "• `/digest` - Generate a daily digest manually\n\n"
+            "• `/stats` - View learning progress\n\n"
             "**Tip:** Use Interactive mode to capture your key takeaways while listening!",
             parse_mode="Markdown",
         )
@@ -741,27 +736,6 @@ class KnowledgeBot:
 
         return vault_path
 
-    async def _regular_insight_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Regular /insight command when not in podcast session."""
-        if not context.args:
-            await update.message.reply_text(
-                "Please provide an insight.\n" "Usage: `/insight <your insight here>`",
-                parse_mode="Markdown",
-            )
-            return
-
-        insight_text = " ".join(context.args)
-
-        try:
-            result = self.vault.save_insight(insight_text)
-            await update.message.reply_text(
-                f"💡 Insight saved!\n" f"Saved to: `{result}`",
-                parse_mode="Markdown",
-            )
-        except Exception as e:
-            logger.exception("Error saving insight")
-            await update.message.reply_text(f"❌ Error saving insight: {sanitize_error_message(e)}")
-
     async def podcast_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Cancel the podcast conversation."""
         user_id = update.effective_user.id
@@ -844,46 +818,6 @@ class KnowledgeBot:
             logger.exception("Error processing thread")
             await update.message.reply_text(f"❌ Error processing thread: {sanitize_error_message(e)}")
 
-    async def note_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /note command for quick captures."""
-        if not self._check_access(update):
-            await self._deny_access(update)
-            return
-
-        if not context.args:
-            await update.message.reply_text(
-                "Please provide some text.\n" "Usage: `/note <your thought here>`",
-                parse_mode="Markdown",
-            )
-            return
-
-        note_text = " ".join(context.args)
-
-        try:
-            result = self.vault.save_note(note_text)
-            await update.message.reply_text(
-                f"📝 Note saved!\n" f"Saved to: `{result}`",
-                parse_mode="Markdown",
-            )
-        except Exception as e:
-            logger.exception("Error saving note")
-            await update.message.reply_text(f"❌ Error saving note: {sanitize_error_message(e)}")
-
-    async def insight_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /insight command - routes to podcast session or regular insight."""
-        if not self._check_access(update):
-            await self._deny_access(update)
-            return
-
-        user_id = update.effective_user.id
-        session = self.podcast_sessions.get(user_id)
-
-        if session and session.get("mode") == "interactive":
-            # In podcast interactive mode
-            return await self.podcast_insight_command(update, context)
-        else:
-            # Regular insight
-            return await self._regular_insight_command(update, context)
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /status command."""
@@ -1643,8 +1577,6 @@ def main():
     application.add_handler(CommandHandler("stats", bot.stats_command))
     application.add_handler(podcast_conv_handler)
     application.add_handler(CommandHandler("lookup", bot.lookup_command))
-    application.add_handler(CommandHandler("note", bot.note_command))
-    application.add_handler(CommandHandler("insight", bot.insight_command))
     application.add_handler(CommandHandler("status", bot.status_command))
     application.add_handler(CommandHandler("digest", bot.digest_command))
 
