@@ -1,0 +1,1463 @@
+"""Telegram bot handlers and main entry point."""
+
+import asyncio
+import logging
+import re
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from pathlib import Path
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    CallbackQueryHandler,
+    ConversationHandler,
+    filters,
+)
+
+from src.config import get_config, init_config
+from src.processors.podcast import PodcastProcessor
+from src.processors.article import ArticleProcessor
+from src.processors.thread import ThreadProcessor
+from src.storage.vault import VaultWriter
+from src.storage.vectors import VectorStore
+from src.storage.summaries import SummaryStorage
+from src.digest.daily import DailyDigest, DigestScheduler
+from src.security import AccessControl, sanitize_error_message, validate_url
+
+# Set up logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+# Conversation states for podcast flow
+PODCAST_MODE_SELECT = 1
+PODCAST_INTERACTIVE = 2
+PODCAST_REVIEW = 3
+
+
+class KnowledgeBot:
+    """Main bot class coordinating all components."""
+
+    def __init__(self):
+        self.config = get_config()
+        self.vault = VaultWriter(self.config.obsidian.vault_path)
+        self.vector_store = VectorStore(self.config.obsidian.vault_path / ".vectors.db")
+        self.summary_storage = SummaryStorage(self.config.obsidian.vault_path / ".summaries.json")
+        self.podcast_processor = PodcastProcessor(self.config, self.vault)
+        self.article_processor = ArticleProcessor(self.config, self.vault)
+        self.thread_processor = ThreadProcessor(self.config, self.vault)
+
+        # Access control - only allow configured users
+        self.access_control = AccessControl(self.config.telegram.allowed_users)
+
+        # Daily digest (will be configured with Telegram callback later)
+        self.daily_digest = DailyDigest(
+            config=self.config,
+            vault=self.vault,
+            vector_store=self.vector_store,
+        )
+        self.digest_scheduler = DigestScheduler(self.daily_digest)
+        self._telegram_app = None
+
+        # Active podcast sessions for interactive mode
+        # Key: user_id, Value: session data
+        self.podcast_sessions = {}
+
+    def _check_access(self, update: Update) -> bool:
+        """Check if the user is authorized. Returns True if allowed."""
+        user = update.effective_user
+        if not user:
+            return False
+        return self.access_control.is_allowed(user.id)
+
+    async def _deny_access(self, update: Update) -> None:
+        """Send access denied message."""
+        user = update.effective_user
+        logger.warning(f"Unauthorized access attempt by user {user.id if user else 'unknown'}")
+        await update.message.reply_text(
+            "❌ You are not authorized to use this bot.\n"
+            f"Your user ID is: `{user.id if user else 'unknown'}`\n"
+            "Contact the bot owner to request access.",
+            parse_mode="Markdown",
+        )
+
+    def set_telegram_app(self, app: Application) -> None:
+        """Set the Telegram app for sending digest messages."""
+        self._telegram_app = app
+
+        # Configure digest to send Telegram messages
+        async def send_telegram_digest(message: str):
+            if self._telegram_app:
+                # This would need the chat_id - we'll store it from /start
+                pass  # TODO: Implement once we track user chat IDs
+
+        self.daily_digest.send_telegram_message = send_telegram_digest
+
+    def start_scheduler(self) -> None:
+        """Start the daily digest scheduler."""
+        self.digest_scheduler.start()
+        logger.info("Daily digest scheduler started")
+
+    def stop_scheduler(self) -> None:
+        """Stop the daily digest scheduler."""
+        self.digest_scheduler.stop()
+
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /start command."""
+        await update.message.reply_text(
+            "👋 Welcome to Knowledge Bot!\n\n"
+            "I help you capture key learnings from podcasts.\n\n"
+            "**Commands:**\n"
+            "/podcast <url> - Process and summarize a podcast\n"
+            "/lookup - Browse your past podcast summaries\n"
+            "/note <text> - Quick capture a thought\n"
+            "/insight <text> - Tag something as a key insight\n"
+            "/status - Check processing status\n\n"
+            "**Supported podcasts:** Spotify, Apple Podcasts, RSS feeds\n\n"
+            "Just paste a podcast link to get started!",
+            parse_mode="Markdown",
+        )
+
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /help command."""
+        await update.message.reply_text(
+            "📚 **Podcast Knowledge Bot Help**\n\n"
+            "**Process Podcasts:**\n"
+            "• `/podcast <url>` - Process a Spotify or Apple Podcasts episode\n"
+            "• Just paste a podcast link to start\n\n"
+            "**Summary Modes:**\n"
+            "• **AI-Only** - Let AI generate the full summary automatically\n"
+            "• **Interactive** - Add your own notes while it transcribes, then AI enhances them\n\n"
+            "**Browse Past Summaries:**\n"
+            "• `/lookup` - View your previous podcast summaries\n\n"
+            "**Quick Notes:**\n"
+            "• `/note <text>` - Capture a quick thought\n"
+            "• `/insight <text>` - Mark something as a key insight\n\n"
+            "**Other:**\n"
+            "• `/status` - Check processing queue\n"
+            "• `/digest` - Generate a daily digest manually\n\n"
+            "**Tip:** Use Interactive mode to capture your key takeaways while listening!",
+            parse_mode="Markdown",
+        )
+
+    async def podcast_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle /podcast command - starts the podcast conversation flow."""
+        if not self._check_access(update):
+            await self._deny_access(update)
+            return ConversationHandler.END
+
+        if not context.args:
+            await update.message.reply_text(
+                "Please provide a podcast URL.\n"
+                "Usage: `/podcast <spotify-link>` or `/podcast <rss-url>`",
+                parse_mode="Markdown",
+            )
+            return ConversationHandler.END
+
+        url = context.args[0]
+
+        # Validate URL for SSRF protection
+        is_valid, error = validate_url(url)
+        if not is_valid:
+            await update.message.reply_text(f"❌ Invalid URL: {error}")
+            return ConversationHandler.END
+
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+
+        # Store initial session data - ask for mode BEFORE transcription
+        self.podcast_sessions[user_id] = {
+            "url": url,
+            "transcript": None,  # Will be populated after transcription
+            "metadata": None,
+            "user_details": [],
+            "user_insights": [],
+            "mode": None,
+            "draft_email": None,
+            "transcription_task": None,
+            "transcription_complete": False,
+            "transcription_error": None,
+            "chat_id": chat_id,
+        }
+
+        # Ask for mode selection FIRST
+        keyboard = [
+            [InlineKeyboardButton("1️⃣ AI picks the highlights", callback_data="podcast_mode_1")],
+            [InlineKeyboardButton("2️⃣ I'll highlight what matters", callback_data="podcast_mode_2")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            "🎙️ **Podcast Processing**\n\n"
+            "Both options generate an AI-written email summary.\n"
+            "The difference is who decides what's important:\n\n"
+            "**Option 1:** AI analyzes the transcript and picks the key details/insights\n\n"
+            "**Option 2:** YOU tell the AI what stood out while listening, then AI writes the email around your highlights\n\n"
+            "_Either way, you'll review and can give feedback before saving._",
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+        return PODCAST_MODE_SELECT
+
+    async def _run_transcription(self, user_id: int, url: str, app: Application) -> None:
+        """Run transcription in the background and update session when done."""
+        session = self.podcast_sessions.get(user_id)
+        if not session:
+            return
+
+        chat_id = session["chat_id"]
+
+        # Status callback to send updates to user
+        async def status_callback(msg: str):
+            try:
+                await app.bot.send_message(
+                    chat_id=chat_id,
+                    text=msg,
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send status message: {e}")
+
+        try:
+            # Process the podcast with status callback
+            result = await self.podcast_processor.process_transcript_only(
+                url, status_callback=status_callback
+            )
+
+            # Update session with results
+            session["transcript"] = result["transcript"]
+            session["metadata"] = result["metadata"]
+            session["transcription_complete"] = True
+            session["duration_str"] = result["duration_str"]
+
+            # Notify user that transcription is complete
+            if session["mode"] == "ai_only":
+                # For AI-only mode, automatically generate summary
+                await app.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"✅ **Transcription complete!**\n\n"
+                    f"**{result['metadata'].title}**\n"
+                    f"Duration: {result['duration_str']}\n\n"
+                    "🤖 Now generating AI summary...",
+                    parse_mode="Markdown",
+                )
+                # Generate the summary
+                await self._generate_and_send_summary(user_id, app)
+            else:
+                # For interactive mode, just notify them
+                await app.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"✅ **Transcription complete!**\n\n"
+                    f"**{result['metadata'].title}**\n"
+                    f"Duration: {result['duration_str']}\n\n"
+                    f"You have {len(session['user_details'])} details and {len(session['user_insights'])} insights so far.\n"
+                    "Use `/end` when you're ready to generate the summary.",
+                    parse_mode="Markdown",
+                )
+
+        except Exception as e:
+            logger.exception("Error during transcription")
+            session["transcription_error"] = str(e)
+            session["transcription_complete"] = True
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ **Transcription failed:** {sanitize_error_message(e)}\n\nPlease try again with /podcast",
+                parse_mode="Markdown",
+            )
+
+    def _split_long_message(self, text: str, max_length: int = 4000) -> list[str]:
+        """Split a message into chunks at paragraph boundaries."""
+        if len(text) <= max_length:
+            return [text]
+
+        chunks = []
+        current_chunk = ""
+        paragraphs = text.split("\n\n")
+
+        for para in paragraphs:
+            if len(current_chunk) + len(para) + 2 <= max_length:
+                current_chunk += para + "\n\n"
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                # Handle paragraphs longer than max_length
+                if len(para) > max_length:
+                    # Split at sentence boundaries or hard limit
+                    while len(para) > max_length:
+                        chunks.append(para[:max_length])
+                        para = para[max_length:]
+                current_chunk = para + "\n\n"
+
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+
+        return chunks
+
+    async def _send_long_message(self, chat_id: int, text: str, app: Application,
+                                  parse_mode: str = "Markdown", reply_markup=None) -> None:
+        """Send a message via app.bot, splitting into chunks if too long."""
+        chunks = self._split_long_message(text)
+
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=chunk,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup if is_last else None,
+            )
+
+    async def _reply_long_message(self, update: Update, text: str,
+                                   parse_mode: str = "Markdown", reply_markup=None) -> None:
+        """Send a reply message, splitting into chunks if too long."""
+        chunks = self._split_long_message(text)
+
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            await update.message.reply_text(
+                text=chunk,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup if is_last else None,
+            )
+
+    async def _generate_and_send_summary(self, user_id: int, app: Application) -> None:
+        """Generate summary and send for review."""
+        session = self.podcast_sessions.get(user_id)
+        if not session:
+            return
+
+        chat_id = session["chat_id"]
+
+        try:
+            from src.ai.summarizer import Summarizer
+            summarizer = Summarizer(self.config)
+
+            email_content = await summarizer.generate_podcast_email(
+                transcript=session["transcript"],
+                metadata=session["metadata"],
+                user_details=session["user_details"],
+                user_insights=session["user_insights"],
+            )
+
+            session["draft_email"] = email_content
+
+            # Send for review
+            keyboard = [
+                [InlineKeyboardButton("✅ Approve & Save", callback_data="podcast_approve")],
+                [InlineKeyboardButton("✏️ Provide Feedback", callback_data="podcast_feedback")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            # Use chunked sending for long messages
+            full_text = f"📧 **Draft Summary:**\n\n{email_content}\n\n─────────────────\nDoes this look good?"
+            await self._send_long_message(chat_id, full_text, app, reply_markup=reply_markup)
+
+        except Exception as e:
+            logger.exception("Error generating summary")
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Error generating summary: {sanitize_error_message(e)}",
+            )
+
+    async def podcast_mode_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle mode selection for podcast processing."""
+        query = update.callback_query
+        await query.answer()
+
+        user_id = update.effective_user.id
+        session = self.podcast_sessions.get(user_id)
+
+        if not session:
+            await query.edit_message_text("Session expired. Please start again with /podcast")
+            return ConversationHandler.END
+
+        url = session["url"]
+
+        if query.data == "podcast_mode_1":
+            # AI-only mode
+            session["mode"] = "ai_only"
+            await query.edit_message_text(
+                "🤖 **AI-Only Mode Selected**\n\n"
+                "Starting podcast processing. I'll notify you when ready!\n\n"
+                "_This may take several minutes depending on podcast length._"
+            )
+
+            # Start transcription in background
+            app = context.application
+            asyncio.create_task(self._run_transcription(user_id, url, app))
+
+            # Return END because we'll send messages asynchronously
+            return ConversationHandler.END
+
+        elif query.data == "podcast_mode_2":
+            # Interactive mode
+            session["mode"] = "interactive"
+            await query.edit_message_text(
+                "📝 **You're Highlighting Mode**\n\n"
+                "🎵 Transcription is starting in the background...\n\n"
+                "**Add what stood out to you while listening:**\n"
+                "• `/detail <text>` - A key fact, stat, or point\n"
+                "• `/insight <text>` - Your takeaway or connection\n"
+                "• `/end` - Done adding, generate the email\n\n"
+                "Example:\n"
+                "`/detail 80% of fintech startups fail in first 2 years`\n"
+                "`/insight This validates our conservative approach to funding`\n\n"
+                "_AI will write the email around YOUR highlights._",
+                parse_mode="Markdown",
+            )
+
+            # Start transcription in background
+            app = context.application
+            asyncio.create_task(self._run_transcription(user_id, url, app))
+
+            return PODCAST_INTERACTIVE
+
+        return ConversationHandler.END
+
+    async def podcast_detail_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle /detail command in interactive mode."""
+        user_id = update.effective_user.id
+        session = self.podcast_sessions.get(user_id)
+
+        if not session or session.get("mode") != "interactive":
+            await update.message.reply_text("No active podcast session. Start with /podcast")
+            return ConversationHandler.END
+
+        if not context.args:
+            await update.message.reply_text("Please provide the detail text.\nUsage: `/detail <your detail>`", parse_mode="Markdown")
+            return PODCAST_INTERACTIVE
+
+        detail = " ".join(context.args)
+        session["user_details"].append(detail)
+
+        await update.message.reply_text(
+            f"✅ Detail added ({len(session['user_details'])} total)\n\n"
+            f"Continue adding `/detail` or `/insight`, or use `/end` when done.",
+            parse_mode="Markdown",
+        )
+        return PODCAST_INTERACTIVE
+
+    async def podcast_insight_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle /insight command in interactive mode (for podcast session)."""
+        user_id = update.effective_user.id
+        session = self.podcast_sessions.get(user_id)
+
+        if not session or session.get("mode") != "interactive":
+            # Not in podcast session, use regular insight command
+            return await self._regular_insight_command(update, context)
+
+        if not context.args:
+            await update.message.reply_text("Please provide the insight text.\nUsage: `/insight <your insight>`", parse_mode="Markdown")
+            return PODCAST_INTERACTIVE
+
+        insight = " ".join(context.args)
+        session["user_insights"].append(insight)
+
+        await update.message.reply_text(
+            f"💡 Insight added ({len(session['user_insights'])} total)\n\n"
+            f"Continue adding `/detail` or `/insight`, or use `/end` when done.",
+            parse_mode="Markdown",
+        )
+        return PODCAST_INTERACTIVE
+
+    async def podcast_end_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle /end command to finish interactive mode."""
+        user_id = update.effective_user.id
+        session = self.podcast_sessions.get(user_id)
+
+        if not session or session.get("mode") != "interactive":
+            await update.message.reply_text("No active podcast session.")
+            return ConversationHandler.END
+
+        if not session["user_details"] and not session["user_insights"]:
+            await update.message.reply_text(
+                "You haven't added any details or insights yet.\n"
+                "Add some with `/detail` or `/insight`, then use `/end`.",
+                parse_mode="Markdown",
+            )
+            return PODCAST_INTERACTIVE
+
+        # Check if transcription is complete
+        if not session.get("transcription_complete"):
+            await update.message.reply_text(
+                "⏳ **Waiting for transcription to complete...**\n\n"
+                f"You have {len(session['user_details'])} details and {len(session['user_insights'])} insights ready.\n\n"
+                "_I'll generate the summary as soon as transcription finishes._",
+                parse_mode="Markdown",
+            )
+            # Wait for transcription in a loop
+            while not session.get("transcription_complete"):
+                await asyncio.sleep(2)
+
+        # Check if there was an error
+        if session.get("transcription_error"):
+            await update.message.reply_text(
+                f"❌ Transcription failed: {session['transcription_error']}\n\nPlease try again with /podcast"
+            )
+            return ConversationHandler.END
+
+        await update.message.reply_text("🤖 Generating summary with your insights... Please wait.")
+
+        try:
+            from src.ai.summarizer import Summarizer
+            summarizer = Summarizer(self.config)
+
+            email_content = await summarizer.generate_podcast_email(
+                transcript=session["transcript"],
+                metadata=session["metadata"],
+                user_details=session["user_details"],
+                user_insights=session["user_insights"],
+            )
+
+            session["draft_email"] = email_content
+
+            # Send for review
+            keyboard = [
+                [InlineKeyboardButton("✅ Approve & Save", callback_data="podcast_approve")],
+                [InlineKeyboardButton("✏️ Provide Feedback", callback_data="podcast_feedback")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            full_text = f"📧 **Draft Summary:**\n\n{email_content}\n\n─────────────────\nDoes this look good?"
+            await self._reply_long_message(update, full_text, reply_markup=reply_markup)
+            return PODCAST_REVIEW
+
+        except Exception as e:
+            logger.exception("Error generating summary")
+            await update.message.reply_text(f"❌ Error: {sanitize_error_message(e)}")
+            return ConversationHandler.END
+
+    async def podcast_review_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle approve/feedback callbacks for podcast review (within ConversationHandler)."""
+        return await self._handle_podcast_review(update, context, in_conversation=True)
+
+    async def podcast_review_standalone(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle approve/feedback callbacks for podcast review (standalone, outside ConversationHandler)."""
+        await self._handle_podcast_review(update, context, in_conversation=False)
+
+    async def _handle_podcast_review(self, update: Update, context: ContextTypes.DEFAULT_TYPE, in_conversation: bool = False) -> int:
+        """Handle approve/feedback callbacks for podcast review."""
+        query = update.callback_query
+        await query.answer()
+
+        user_id = update.effective_user.id
+        session = self.podcast_sessions.get(user_id)
+
+        if not session:
+            await query.edit_message_text("Session expired. Please start again with /podcast")
+            return ConversationHandler.END if in_conversation else None
+
+        if query.data == "podcast_approve":
+            # Save to summary storage
+            await query.edit_message_text("💾 Saving...")
+
+            try:
+                # Save to summary storage (not Obsidian)
+                summary_id = self.summary_storage.save_summary(
+                    title=session['metadata'].title,
+                    email_content=session['draft_email'],
+                    transcript=session['transcript'],
+                    show=session['metadata'].show_name,
+                    url=session['metadata'].url,
+                    duration=session.get('duration_str'),
+                )
+
+                # Store the saved ID for potential editing
+                if not hasattr(self, '_saved_summaries'):
+                    self._saved_summaries = {}
+                self._saved_summaries[user_id] = {
+                    'id': summary_id,
+                    'title': session['metadata'].title,
+                    'show': session['metadata'].show_name,
+                }
+
+                # Update the saving message to show success
+                await query.edit_message_text("✅ **Saved!**")
+
+                # Show options in a separate message
+                keyboard = [
+                    [InlineKeyboardButton("✏️ Edit", callback_data="saved_edit")],
+                    [InlineKeyboardButton("📧 Send as Email", callback_data="saved_email")],
+                    [InlineKeyboardButton("✅ Done", callback_data="saved_done")],
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.message.reply_text(
+                    f"**What's next?**\n\n"
+                    f"Use `/lookup` anytime to view and edit your saved summaries.",
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup,
+                )
+
+                # Clean up session
+                del self.podcast_sessions[user_id]
+                return ConversationHandler.END if in_conversation else None
+
+            except Exception as e:
+                logger.exception("Error saving podcast")
+                await query.message.reply_text(f"❌ Error saving: {sanitize_error_message(e)}")
+                return ConversationHandler.END if in_conversation else None
+
+        elif query.data == "podcast_feedback":
+            # Store that we're waiting for feedback
+            if not hasattr(self, '_feedback_state'):
+                self._feedback_state = {}
+            self._feedback_state[user_id] = True
+
+            await query.edit_message_text(
+                "📝 Please type your feedback or changes you'd like made.\n\n"
+                "For example: \"Make it more concise\" or \"Add more emphasis on the mindset section\"",
+            )
+            return PODCAST_REVIEW if in_conversation else None
+
+        return ConversationHandler.END if in_conversation else None
+
+    async def podcast_feedback_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle feedback text for regenerating podcast summary."""
+        user_id = update.effective_user.id
+        session = self.podcast_sessions.get(user_id)
+
+        if not session:
+            await update.message.reply_text("Session expired. Please start again with /podcast")
+            return ConversationHandler.END
+
+        feedback = update.message.text
+        await update.message.reply_text("🔄 Regenerating with your feedback...")
+
+        try:
+            from src.ai.summarizer import Summarizer
+            summarizer = Summarizer(self.config)
+
+            email_content = await summarizer.generate_podcast_email(
+                transcript=session["transcript"],
+                metadata=session["metadata"],
+                user_details=session["user_details"],
+                user_insights=session["user_insights"],
+                feedback=feedback,
+                previous_draft=session["draft_email"],
+            )
+
+            session["draft_email"] = email_content
+
+            # Send for review again
+            keyboard = [
+                [InlineKeyboardButton("✅ Approve & Save", callback_data="podcast_approve")],
+                [InlineKeyboardButton("✏️ More Feedback", callback_data="podcast_feedback")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            full_text = f"📧 **Updated Draft:**\n\n{email_content}\n\n─────────────────\nDoes this look good now?"
+            await self._reply_long_message(update, full_text, reply_markup=reply_markup)
+            return PODCAST_REVIEW
+
+        except Exception as e:
+            logger.exception("Error regenerating summary")
+            await update.message.reply_text(f"❌ Error: {sanitize_error_message(e)}")
+            return ConversationHandler.END
+
+    async def _save_podcast_to_vault(self, session: dict) -> str:
+        """Save the approved podcast summary to Obsidian vault."""
+        metadata = session["metadata"]
+
+        # Save the email-style content to vault
+        vault_path = self.vault.save_podcast_email(
+            metadata=metadata,
+            email_content=session["draft_email"],
+            transcript=session["transcript"],
+        )
+
+        # Also add to scratchpad
+        self.vault.save_content_to_scratchpad(
+            content_type="podcast",
+            title=metadata.title,
+            summary=session["draft_email"][:500] + "...",
+            vault_path=vault_path,
+        )
+
+        return vault_path
+
+    async def _regular_insight_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Regular /insight command when not in podcast session."""
+        if not context.args:
+            await update.message.reply_text(
+                "Please provide an insight.\n" "Usage: `/insight <your insight here>`",
+                parse_mode="Markdown",
+            )
+            return
+
+        insight_text = " ".join(context.args)
+
+        try:
+            result = self.vault.save_insight(insight_text)
+            await update.message.reply_text(
+                f"💡 Insight saved!\n" f"Saved to: `{result}`",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.exception("Error saving insight")
+            await update.message.reply_text(f"❌ Error saving insight: {sanitize_error_message(e)}")
+
+    async def podcast_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Cancel the podcast conversation."""
+        user_id = update.effective_user.id
+        if user_id in self.podcast_sessions:
+            del self.podcast_sessions[user_id]
+        await update.message.reply_text("❌ Podcast session cancelled.")
+        return ConversationHandler.END
+
+    async def article_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /article command."""
+        if not self._check_access(update):
+            await self._deny_access(update)
+            return
+
+        if not context.args:
+            await update.message.reply_text(
+                "Please provide an article URL.\n" "Usage: `/article <url>`",
+                parse_mode="Markdown",
+            )
+            return
+
+        url = context.args[0]
+
+        # Validate URL for SSRF protection
+        is_valid, error = validate_url(url)
+        if not is_valid:
+            await update.message.reply_text(f"❌ Invalid URL: {error}")
+            return
+
+        await update.message.reply_text("📰 Extracting article...")
+
+        try:
+            result = await self.article_processor.process(url)
+            await update.message.reply_text(
+                f"✅ Article saved!\n\n"
+                f"**{result.title}**\n"
+                f"Author: {result.author or 'Unknown'}\n"
+                f"Saved to: `{result.vault_path}`\n\n"
+                f"Summary:\n{result.summary[:500]}...",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.exception("Error processing article")
+            await update.message.reply_text(f"❌ Error processing article: {sanitize_error_message(e)}")
+
+    async def thread_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /thread command."""
+        if not self._check_access(update):
+            await self._deny_access(update)
+            return
+
+        if not context.args:
+            await update.message.reply_text(
+                "Please provide an X/Twitter thread URL.\n" "Usage: `/thread <url>`",
+                parse_mode="Markdown",
+            )
+            return
+
+        url = context.args[0]
+
+        # Validate URL for SSRF protection
+        is_valid, error = validate_url(url)
+        if not is_valid:
+            await update.message.reply_text(f"❌ Invalid URL: {error}")
+            return
+
+        await update.message.reply_text("🧵 Capturing thread...")
+
+        try:
+            result = await self.thread_processor.process(url)
+            await update.message.reply_text(
+                f"✅ Thread saved!\n\n"
+                f"**@{result.author}**\n"
+                f"Tweets: {result.tweet_count}\n"
+                f"Saved to: `{result.vault_path}`\n\n"
+                f"Summary:\n{result.summary[:500]}...",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.exception("Error processing thread")
+            await update.message.reply_text(f"❌ Error processing thread: {sanitize_error_message(e)}")
+
+    async def note_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /note command for quick captures."""
+        if not self._check_access(update):
+            await self._deny_access(update)
+            return
+
+        if not context.args:
+            await update.message.reply_text(
+                "Please provide some text.\n" "Usage: `/note <your thought here>`",
+                parse_mode="Markdown",
+            )
+            return
+
+        note_text = " ".join(context.args)
+
+        try:
+            result = self.vault.save_note(note_text)
+            await update.message.reply_text(
+                f"📝 Note saved!\n" f"Saved to: `{result}`",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.exception("Error saving note")
+            await update.message.reply_text(f"❌ Error saving note: {sanitize_error_message(e)}")
+
+    async def insight_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /insight command - routes to podcast session or regular insight."""
+        if not self._check_access(update):
+            await self._deny_access(update)
+            return
+
+        user_id = update.effective_user.id
+        session = self.podcast_sessions.get(user_id)
+
+        if session and session.get("mode") == "interactive":
+            # In podcast interactive mode
+            return await self.podcast_insight_command(update, context)
+        else:
+            # Regular insight
+            return await self._regular_insight_command(update, context)
+
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /status command."""
+        if not self._check_access(update):
+            await self._deny_access(update)
+            return
+
+        # Get processing queue status
+        podcast_queue = self.podcast_processor.get_queue_status()
+
+        # Get content counts
+        total_items = self.vector_store.count()
+
+        status_msg = "📊 **Bot Status**\n\n"
+        status_msg += f"**Total content stored:** {total_items} items\n\n"
+
+        if podcast_queue:
+            status_msg += "**Podcast Queue:**\n"
+            for item in podcast_queue:
+                status_msg += f"• {item['title']}: {item['status']}\n"
+        else:
+            status_msg += "No items in processing queue.\n"
+
+        status_msg += f"\n**Daily digest:** {self.config.digest.time} ({self.config.digest.timezone})"
+
+        await update.message.reply_text(status_msg, parse_mode="Markdown")
+
+    async def digest_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /digest command to manually trigger digest."""
+        if not self._check_access(update):
+            await self._deny_access(update)
+            return
+
+        await update.message.reply_text("📚 Generating daily digest...")
+
+        try:
+            vault_path = await self.digest_scheduler.trigger_now()
+            if vault_path:
+                await update.message.reply_text(
+                    f"✅ Daily digest generated!\n"
+                    f"Saved to: `{vault_path}`",
+                    parse_mode="Markdown",
+                )
+            else:
+                await update.message.reply_text(
+                    "No content was processed today. Nothing to digest!"
+                )
+        except Exception as e:
+            logger.exception("Error generating digest")
+            await update.message.reply_text(f"❌ Error generating digest: {sanitize_error_message(e)}")
+
+    async def lookup_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /lookup command to browse historical podcast summaries."""
+        if not self._check_access(update):
+            await self._deny_access(update)
+            return
+
+        # Get list of podcast summaries from storage
+        summaries = self.summary_storage.list_summaries(limit=10)
+
+        if not summaries:
+            await update.message.reply_text(
+                "📂 No podcast summaries found yet.\n\n"
+                "Process some podcasts with /podcast first!"
+            )
+            return
+
+        # Build list message
+        msg = "📚 **Recent Podcast Summaries**\n\n"
+        for i, item in enumerate(summaries, 1):
+            show_info = f" ({item.show})" if item.show else ""
+            # Parse date from ISO format
+            date_str = item.created_at[:10] if item.created_at else ""
+            msg += f"{i}. **{item.title}**{show_info}\n"
+            msg += f"   📅 {date_str}\n\n"
+
+        msg += "─────────────────\n"
+        msg += "Reply with a number to view that summary."
+
+        # Store lookup state
+        user_id = update.effective_user.id
+        self._lookup_state = self._lookup_state if hasattr(self, '_lookup_state') else {}
+        self._lookup_state[user_id] = summaries
+
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def lookup_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle selection from lookup list."""
+        if not self._check_access(update):
+            return
+
+        user_id = update.effective_user.id
+        if not hasattr(self, '_lookup_state') or user_id not in self._lookup_state:
+            return
+
+        try:
+            selection = int(update.message.text.strip())
+            summaries = self._lookup_state[user_id]
+
+            if 1 <= selection <= len(summaries):
+                item = summaries[selection - 1]
+
+                # Store the selected item for actions
+                if not hasattr(self, '_saved_summaries'):
+                    self._saved_summaries = {}
+                self._saved_summaries[user_id] = {
+                    'id': item.id,
+                    'title': item.title,
+                    'show': item.show,
+                    'transcript': item.transcript,
+                }
+
+                # Show summary with action buttons
+                keyboard = [
+                    [InlineKeyboardButton("✏️ Edit", callback_data="saved_edit")],
+                    [InlineKeyboardButton("📧 Send as Email", callback_data="saved_email")],
+                    [InlineKeyboardButton("🗑️ Delete", callback_data="saved_delete")],
+                    [InlineKeyboardButton("📚 Back to List", callback_data="saved_back")],
+                    [InlineKeyboardButton("✅ Done", callback_data="saved_done")],
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                show_info = f" from **{item.show}**" if item.show else ""
+                date_str = item.created_at[:10] if item.created_at else ""
+                full_text = (
+                    f"📧 **{item.title}**{show_info}\n"
+                    f"📅 {date_str}\n\n"
+                    f"─────────────────\n\n"
+                    f"{item.email_content}"
+                )
+                await self._reply_long_message(update, full_text, reply_markup=reply_markup)
+            else:
+                await update.message.reply_text(f"Please enter a number between 1 and {len(summaries)}")
+        except ValueError:
+            pass  # Not a number, ignore
+
+    async def saved_action_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle actions on saved summaries (edit, email, back, done)."""
+        query = update.callback_query
+        await query.answer()
+
+        user_id = update.effective_user.id
+        saved_info = self._saved_summaries.get(user_id) if hasattr(self, '_saved_summaries') else None
+
+        if query.data == "saved_done":
+            # Clean up and dismiss
+            if hasattr(self, '_lookup_state') and user_id in self._lookup_state:
+                del self._lookup_state[user_id]
+            if hasattr(self, '_saved_summaries') and user_id in self._saved_summaries:
+                del self._saved_summaries[user_id]
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("👍 All done!")
+
+        elif query.data == "saved_back":
+            # Go back to lookup list
+            if hasattr(self, '_saved_summaries') and user_id in self._saved_summaries:
+                del self._saved_summaries[user_id]
+            await query.edit_message_reply_markup(reply_markup=None)
+            # Trigger lookup again
+            await self.lookup_command(update, context)
+
+        elif query.data == "saved_edit":
+            if saved_info:
+                # Store edit state for this user
+                if not hasattr(self, '_edit_state'):
+                    self._edit_state = {}
+                self._edit_state[user_id] = saved_info
+
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text(
+                    f"✏️ **Edit Mode**\n\n"
+                    f"Type your feedback to regenerate the email summary using AI.\n\n"
+                    f"Examples:\n"
+                    f"• \"Make it shorter\"\n"
+                    f"• \"Add more emphasis on the key insights\"\n"
+                    f"• \"Include more specific numbers/stats\"\n\n"
+                    f"Or type `/cancel` to go back.",
+                    parse_mode="Markdown",
+                )
+            else:
+                await query.message.reply_text("❌ No summary selected.")
+
+        elif query.data == "saved_delete":
+            if saved_info:
+                # Show confirmation
+                keyboard = [
+                    [InlineKeyboardButton("⚠️ Yes, Delete", callback_data="saved_delete_confirm")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="saved_delete_cancel")],
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text(
+                    f"🗑️ **Delete this summary?**\n\n"
+                    f"**{saved_info['title']}**\n\n"
+                    f"This will permanently remove the file from your vault.",
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup,
+                )
+            else:
+                await query.message.reply_text("❌ No summary selected.")
+
+        elif query.data == "saved_delete_confirm":
+            if saved_info and 'id' in saved_info:
+                # Delete from storage
+                success = self.summary_storage.delete_summary(saved_info['id'])
+                await query.edit_message_reply_markup(reply_markup=None)
+                if success:
+                    await query.message.reply_text(
+                        f"✅ **Deleted:** {saved_info['title']}\n\n"
+                        f"Use `/lookup` to view remaining summaries."
+                    )
+                else:
+                    await query.message.reply_text("❌ Failed to delete.")
+
+                # Clean up state
+                if hasattr(self, '_saved_summaries') and user_id in self._saved_summaries:
+                    del self._saved_summaries[user_id]
+                if hasattr(self, '_lookup_state') and user_id in self._lookup_state:
+                    del self._lookup_state[user_id]
+            else:
+                await query.message.reply_text("❌ No summary selected.")
+
+        elif query.data == "saved_delete_cancel":
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("❌ Delete cancelled.")
+
+        elif query.data == "saved_email":
+            if not self.config.email.enabled:
+                await query.message.reply_text(
+                    "📧 Email is not configured.\n\n"
+                    "To enable email, update `config.yaml` with your SMTP settings."
+                )
+                return
+
+            if saved_info:
+                # Store that we're waiting for email address
+                if not hasattr(self, '_email_state'):
+                    self._email_state = {}
+                self._email_state[user_id] = saved_info
+
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text(
+                    "📧 **Send as Email**\n\n"
+                    "Reply with the email address to send to:\n\n"
+                    "_Example: `someone@example.com`_\n\n"
+                    "Or type `/cancel` to go back.",
+                    parse_mode="Markdown",
+                )
+            else:
+                await query.message.reply_text("❌ No summary selected.")
+
+    async def _send_email(self, to_email: str, subject: str, body: str) -> bool:
+        """Send an email with the podcast summary."""
+        if not self.config.email.enabled:
+            return False
+
+        try:
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From'] = self.config.email.sender_email
+            msg['To'] = to_email
+
+            # Plain text version
+            text_part = MIMEText(body, 'plain')
+            msg.attach(text_part)
+
+            # Connect and send
+            with smtplib.SMTP(self.config.email.smtp_server, self.config.email.smtp_port) as server:
+                server.starttls()
+                server.login(self.config.email.sender_email, self.config.email.sender_password)
+                server.sendmail(self.config.email.sender_email, to_email, msg.as_string())
+
+            return True
+        except Exception as e:
+            logger.exception(f"Error sending email: {e}")
+            return False
+
+    async def _handle_podcast_feedback_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """Handle podcast feedback input (standalone mode). Returns True if handled."""
+        user_id = update.effective_user.id
+
+        # Check if user is in feedback mode
+        if not hasattr(self, '_feedback_state') or user_id not in self._feedback_state:
+            return False
+
+        # Check if they have an active podcast session
+        session = self.podcast_sessions.get(user_id)
+        if not session:
+            del self._feedback_state[user_id]
+            return False
+
+        # Process the feedback
+        feedback = update.message.text
+        await update.message.reply_text("🔄 Regenerating with your feedback...")
+
+        try:
+            from src.ai.summarizer import Summarizer
+            summarizer = Summarizer(self.config)
+
+            email_content = await summarizer.generate_podcast_email(
+                transcript=session["transcript"],
+                metadata=session["metadata"],
+                user_details=session.get("user_details", []),
+                user_insights=session.get("user_insights", []),
+                feedback=feedback,
+                previous_draft=session.get("draft_email"),
+            )
+
+            session["draft_email"] = email_content
+
+            # Send for review again
+            keyboard = [
+                [InlineKeyboardButton("✅ Approve & Save", callback_data="podcast_approve")],
+                [InlineKeyboardButton("✏️ More Feedback", callback_data="podcast_feedback")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            full_text = f"📧 **Updated Draft:**\n\n{email_content}\n\n─────────────────\nDoes this look good now?"
+            await self._reply_long_message(update, full_text, reply_markup=reply_markup)
+
+            # Clear feedback state
+            del self._feedback_state[user_id]
+
+        except Exception as e:
+            logger.exception("Error regenerating summary")
+            await update.message.reply_text(f"❌ Error: {sanitize_error_message(e)}")
+            del self._feedback_state[user_id]
+
+        return True
+
+    async def _handle_edit_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """Handle edit feedback input. Returns True if handled."""
+        user_id = update.effective_user.id
+        if not hasattr(self, '_edit_state') or user_id not in self._edit_state:
+            return False
+
+        text = update.message.text.strip()
+
+        # Check for cancel
+        if text.lower() == '/cancel':
+            del self._edit_state[user_id]
+            await update.message.reply_text("✏️ Edit cancelled.")
+            return True
+
+        edit_info = self._edit_state[user_id]
+
+        # Get the current summary and transcript from storage
+        summary_obj = self.summary_storage.get_summary(edit_info['id']) if 'id' in edit_info else None
+
+        if not summary_obj:
+            await update.message.reply_text("❌ Could not read the summary.")
+            del self._edit_state[user_id]
+            return True
+
+        current_summary = summary_obj.email_content
+        transcript = summary_obj.transcript
+
+        await update.message.reply_text("🔄 Regenerating with your feedback...")
+
+        try:
+            from src.ai.summarizer import Summarizer
+            summarizer = Summarizer(self.config)
+
+            # Create a minimal metadata object
+            from src.storage.vault import PodcastMetadata
+            metadata = PodcastMetadata(
+                title=edit_info['title'],
+                show_name=edit_info.get('show'),
+            )
+
+            # Regenerate with feedback
+            new_summary = await summarizer.generate_podcast_email(
+                transcript=transcript,
+                metadata=metadata,
+                user_details=[],
+                user_insights=[],
+                feedback=text,
+                previous_draft=current_summary,
+            )
+
+            # Show preview with approve/more feedback options
+            keyboard = [
+                [InlineKeyboardButton("✅ Save Changes", callback_data="edit_save")],
+                [InlineKeyboardButton("✏️ More Feedback", callback_data="edit_more")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="edit_cancel")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            # Store the new summary for saving
+            edit_info['new_summary'] = new_summary
+
+            full_text = f"📧 **Updated Email:**\n\n{new_summary}\n\n─────────────────\nLook good?"
+            await self._reply_long_message(update, full_text, reply_markup=reply_markup)
+
+        except Exception as e:
+            logger.exception("Error regenerating summary")
+            await update.message.reply_text(f"❌ Error: {sanitize_error_message(e)}")
+            del self._edit_state[user_id]
+
+        return True
+
+    async def edit_action_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle edit save/more feedback/cancel actions."""
+        query = update.callback_query
+        await query.answer()
+
+        user_id = update.effective_user.id
+        edit_info = self._edit_state.get(user_id) if hasattr(self, '_edit_state') else None
+
+        if query.data == "edit_save":
+            if edit_info and 'new_summary' in edit_info and 'id' in edit_info:
+                # Save the updated summary to storage
+                success = self.summary_storage.update_summary(edit_info['id'], edit_info['new_summary'])
+                await query.edit_message_reply_markup(reply_markup=None)
+                if success:
+                    await query.message.reply_text("✅ **Changes saved!**\n\nUse `/lookup` to view your updated summary.")
+                else:
+                    await query.message.reply_text("❌ Failed to save changes.")
+                del self._edit_state[user_id]
+            else:
+                await query.message.reply_text("❌ No changes to save.")
+
+        elif query.data == "edit_more":
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(
+                "✏️ Type more feedback to further refine the email.\n\n"
+                "Or type `/cancel` to discard changes.",
+                parse_mode="Markdown",
+            )
+
+        elif query.data == "edit_cancel":
+            if hasattr(self, '_edit_state') and user_id in self._edit_state:
+                del self._edit_state[user_id]
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("❌ Changes discarded.")
+
+    async def _handle_email_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """Handle email address input. Returns True if handled."""
+        user_id = update.effective_user.id
+        if not hasattr(self, '_email_state') or user_id not in self._email_state:
+            return False
+
+        text = update.message.text.strip()
+
+        # Check for cancel
+        if text.lower() == '/cancel':
+            del self._email_state[user_id]
+            await update.message.reply_text("📧 Email cancelled.")
+            return True
+
+        # Validate email address
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_pattern, text):
+            await update.message.reply_text(
+                "❌ Invalid email address. Please enter a valid email or `/cancel` to go back.",
+                parse_mode="Markdown",
+            )
+            return True
+
+        # Get the summary info
+        saved_info = self._email_state[user_id]
+
+        # Get summary from storage
+        summary_obj = self.summary_storage.get_summary(saved_info['id']) if 'id' in saved_info else None
+        if not summary_obj:
+            await update.message.reply_text("❌ Could not read the summary.")
+            del self._email_state[user_id]
+            return True
+
+        await update.message.reply_text("📧 Sending email...")
+
+        # Send the email
+        show_info = f" ({saved_info['show']})" if saved_info.get('show') else ""
+        subject = f"Podcast Summary: {saved_info['title']}{show_info}"
+
+        success = await self._send_email(text, subject, summary_obj.email_content)
+
+        if success:
+            await update.message.reply_text(f"✅ Email sent to `{text}`!", parse_mode="Markdown")
+        else:
+            await update.message.reply_text(
+                "❌ Failed to send email. Check your email configuration in `config.yaml`.",
+                parse_mode="Markdown",
+            )
+
+        # Clean up
+        del self._email_state[user_id]
+        return True
+
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle text messages - for lookup selection and podcast links."""
+        if not self._check_access(update):
+            return
+
+        message = update.message
+        text = message.text or message.caption or ""
+
+        # Check for podcast feedback input (standalone mode)
+        if await self._handle_podcast_feedback_input(update, context):
+            return
+
+        # Check for edit input first
+        if await self._handle_edit_input(update, context):
+            return
+
+        # Check for email input
+        if await self._handle_email_input(update, context):
+            return
+
+        # Check for lookup selection
+        user_id = update.effective_user.id
+        if hasattr(self, '_lookup_state') and user_id in self._lookup_state:
+            await self.lookup_selection(update, context)
+            return
+
+        # Check for podcast URLs in the message
+        url_pattern = r"https?://[^\s]+"
+        urls = re.findall(url_pattern, text)
+
+        if urls:
+            url = urls[0]
+
+            # Validate URL for SSRF protection
+            is_valid, error = validate_url(url)
+            if not is_valid:
+                await update.message.reply_text(f"❌ Invalid URL: {error}")
+                return
+
+            # Only process podcast links
+            if "spotify.com" in url or "podcasts.apple.com" in url:
+                await update.message.reply_text("🎙️ Detected podcast link. Processing...")
+                # Create mock context with args
+                mock_context = type("Context", (), {"args": [url]})()
+                await self.podcast_command(update, mock_context)
+            else:
+                await update.message.reply_text(
+                    "📝 Note: Currently I only process podcast links.\n"
+                    "Use `/podcast <url>` for Spotify or Apple Podcasts links."
+                )
+        else:
+            # Save as a note
+            if text and update.message.forward_date:  # Only save forwarded messages as notes
+                try:
+                    result = self.vault.save_note(text, source="forwarded")
+                    await update.message.reply_text(
+                        f"📝 Forwarded message saved as note!\n" f"Saved to: `{result}`",
+                        parse_mode="Markdown",
+                    )
+                except Exception as e:
+                    logger.exception("Error saving forwarded note")
+                    await update.message.reply_text(f"❌ Error: {sanitize_error_message(e)}")
+
+
+def main():
+    """Main entry point for the bot."""
+    # Load configuration
+    config_path = Path(__file__).parent.parent / "config.yaml"
+    init_config(config_path)
+    config = get_config()
+
+    # Create bot instance
+    bot = KnowledgeBot()
+
+    # Build application
+    application = Application.builder().token(config.telegram.bot_token).build()
+
+    # Link bot to application for digest messages
+    bot.set_telegram_app(application)
+
+    # Podcast conversation handler with mode selection and review flow
+    podcast_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("podcast", bot.podcast_command)],
+        states={
+            PODCAST_MODE_SELECT: [
+                CallbackQueryHandler(bot.podcast_mode_callback, pattern="^podcast_mode_"),
+            ],
+            PODCAST_INTERACTIVE: [
+                CommandHandler("detail", bot.podcast_detail_command),
+                CommandHandler("insight", bot.podcast_insight_command),
+                CommandHandler("end", bot.podcast_end_command),
+                CommandHandler("cancel", bot.podcast_cancel),
+            ],
+            PODCAST_REVIEW: [
+                CallbackQueryHandler(bot.podcast_review_callback, pattern="^podcast_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, bot.podcast_feedback_text),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", bot.podcast_cancel)],
+        per_user=True,
+        per_chat=True,
+    )
+
+    # Add handlers
+    application.add_handler(CommandHandler("start", bot.start))
+    application.add_handler(CommandHandler("help", bot.help_command))
+    application.add_handler(podcast_conv_handler)
+    application.add_handler(CommandHandler("lookup", bot.lookup_command))
+    application.add_handler(CommandHandler("note", bot.note_command))
+    application.add_handler(CommandHandler("insight", bot.insight_command))
+    application.add_handler(CommandHandler("status", bot.status_command))
+    application.add_handler(CommandHandler("digest", bot.digest_command))
+
+    # Handle podcast approve/feedback callbacks (standalone, outside ConversationHandler)
+    # This catches callbacks from AI-only mode where the conversation has ended
+    application.add_handler(CallbackQueryHandler(bot.podcast_review_standalone, pattern="^podcast_(approve|feedback)$"))
+
+    # Handle saved summary actions (edit, email, back, done)
+    application.add_handler(CallbackQueryHandler(bot.saved_action_callback, pattern="^saved_"))
+
+    # Handle edit actions (save, more feedback, cancel)
+    application.add_handler(CallbackQueryHandler(bot.edit_action_callback, pattern="^edit_"))
+
+    # Handle text messages (for lookup selection, email input, podcast links, and forwarded notes)
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message)
+    )
+
+    # Use post_init to start scheduler after event loop is running
+    async def post_init(app: Application) -> None:
+        bot.start_scheduler()
+
+    async def post_shutdown(app: Application) -> None:
+        bot.stop_scheduler()
+
+    application.post_init = post_init
+    application.post_shutdown = post_shutdown
+
+    # Start the bot
+    logger.info("Starting Knowledge Bot...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()

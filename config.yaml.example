@@ -1,0 +1,49 @@
+# Podcast Knowledge Bot Configuration
+# Copy this file to config.yaml and fill in your values
+
+telegram:
+  # Required: Your Telegram bot token from @BotFather
+  bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+
+  # Security: List your Telegram user ID(s) to restrict access
+  # Get your ID by messaging @userinfobot on Telegram
+  # Leave empty [] to allow anyone (NOT RECOMMENDED)
+  allowed_users: []
+
+obsidian:
+  # Path where the bot stores data (can be any directory)
+  vault_path: "/path/to/your/data/directory"
+
+ai:
+  # Required: Your Anthropic API key from console.anthropic.com
+  anthropic_api_key: "YOUR_ANTHROPIC_API_KEY"
+
+  # Claude model to use for summaries
+  model: "claude-sonnet-4-20250514"
+
+whisper:
+  # Whisper model size for transcription
+  # Options: tiny (fastest), base, small, medium, large-v3 (most accurate)
+  model_size: "base"
+
+  # Device for Whisper inference
+  # Options: auto, cpu, cuda (for NVIDIA GPUs)
+  device: "auto"
+
+digest:
+  # Daily digest time (24-hour format)
+  time: "20:00"
+  timezone: "America/Los_Angeles"
+
+# Optional: Spotify credentials (for private playlists only)
+spotify:
+  client_id: ""
+  client_secret: ""
+
+# Optional: Email settings for sending summaries
+email:
+  enabled: false
+  smtp_server: "smtp.gmail.com"
+  smtp_port: 587
+  sender_email: ""
+  sender_password: ""  # For Gmail, use an App Password
