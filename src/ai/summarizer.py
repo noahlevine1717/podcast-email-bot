@@ -360,6 +360,7 @@ Respond in JSON format:
         user_insights: list[str],
         feedback: Optional[str] = None,
         previous_draft: Optional[str] = None,
+        learned_preferences: Optional[str] = None,
     ) -> str:
         """Generate a professional email-style summary for a podcast.
 
@@ -370,6 +371,7 @@ Respond in JSON format:
             user_insights: User-provided insights (from interactive mode)
             feedback: Optional feedback on previous draft
             previous_draft: Previous draft to improve upon
+            learned_preferences: Context from learning system about user preferences
 
         Returns:
             Formatted email-style summary string
@@ -412,7 +414,13 @@ Apply the feedback while maintaining the email format structure."""
         show_info = f" from {metadata.show_name}" if metadata.show_name else ""
         duration_info = f"{metadata.duration // 60} minutes" if metadata.duration else "Unknown duration"
 
+        # Build learned preferences section
+        preferences_section = ""
+        if learned_preferences:
+            preferences_section = f"\n{learned_preferences}\n"
+
         prompt = f"""Generate a professional email summary for sharing key learnings from this podcast.
+{preferences_section}
 
 PODCAST INFO:
 - Title: {metadata.title}

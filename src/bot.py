@@ -26,6 +26,7 @@ from src.processors.thread import ThreadProcessor
 from src.storage.vault import VaultWriter
 from src.storage.vectors import VectorStore
 from src.storage.summaries import SummaryStorage
+from src.ai.learning import LearningSystem
 from src.digest.daily import DailyDigest, DigestScheduler
 from src.security import AccessControl, sanitize_error_message, validate_url
 
@@ -50,6 +51,7 @@ class KnowledgeBot:
         self.vault = VaultWriter(self.config.obsidian.vault_path)
         self.vector_store = VectorStore(self.config.obsidian.vault_path / ".vectors.db")
         self.summary_storage = SummaryStorage(self.config.obsidian.vault_path / ".summaries.json")
+        self.learning = LearningSystem(self.config.obsidian.vault_path / ".learning.json")
         self.podcast_processor = PodcastProcessor(self.config, self.vault)
         self.article_processor = ArticleProcessor(self.config, self.vault)
         self.thread_processor = ThreadProcessor(self.config, self.vault)
@@ -142,8 +144,43 @@ class KnowledgeBot:
             "• `/insight <text>` - Mark something as a key insight\n\n"
             "**Other:**\n"
             "• `/status` - Check processing queue\n"
+            "• `/stats` - View learning progress\n"
             "• `/digest` - Generate a daily digest manually\n\n"
             "**Tip:** Use Interactive mode to capture your key takeaways while listening!",
+            parse_mode="Markdown",
+        )
+
+    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /stats command - show learning statistics."""
+        if not self._check_access(update):
+            await self._deny_access(update)
+            return
+
+        stats = self.learning.get_stats()
+        prefs = self.learning.preferences
+
+        # Build preferences summary
+        learned_prefs = []
+        if prefs.common_feedback_patterns:
+            learned_prefs.append(f"• Learned patterns: {len(prefs.common_feedback_patterns)}")
+        if prefs.favorite_topics:
+            learned_prefs.append(f"• Topics of interest: {', '.join(prefs.favorite_topics[:5])}")
+
+        prefs_text = "\n".join(learned_prefs) if learned_prefs else "• Still learning your preferences..."
+
+        await update.message.reply_text(
+            "📊 **Learning Statistics**\n\n"
+            f"**Summary Performance:**\n"
+            f"• Podcasts processed: {stats['total_processed']}\n"
+            f"• Approved first try: {stats['approved_first_try']}\n"
+            f"• Edits requested: {stats['edits_requested']}\n"
+            f"• First-try approval rate: {stats['approval_rate']}\n\n"
+            f"**Current Preferences:**\n"
+            f"• Summary length: {stats['preferred_length']}\n"
+            f"• Tone: {stats['preferred_tone']}\n\n"
+            f"**What I've Learned:**\n"
+            f"{prefs_text}\n\n"
+            "_The more feedback you give, the better I get at matching your style!_",
             parse_mode="Markdown",
         )
 
@@ -344,6 +381,7 @@ class KnowledgeBot:
                 metadata=session["metadata"],
                 user_details=session["user_details"],
                 user_insights=session["user_insights"],
+                learned_preferences=self.learning.get_prompt_context(),
             )
 
             session["draft_email"] = email_content
@@ -514,6 +552,7 @@ class KnowledgeBot:
                 metadata=session["metadata"],
                 user_details=session["user_details"],
                 user_insights=session["user_insights"],
+                learned_preferences=self.learning.get_prompt_context(),
             )
 
             session["draft_email"] = email_content
@@ -555,6 +594,14 @@ class KnowledgeBot:
             return ConversationHandler.END if in_conversation else None
 
         if query.data == "podcast_approve":
+            # Record approval for learning (check if this was first try)
+            was_edited = session.get('edit_count', 0) > 0
+            self.learning.record_feedback(
+                podcast_title=session['metadata'].title,
+                feedback_text="approved" if was_edited else "approved_first_try",
+                feedback_type="approve",
+            )
+
             # Save to summary storage
             await query.edit_message_text("💾 Saving...")
 
@@ -635,6 +682,16 @@ class KnowledgeBot:
             from src.ai.summarizer import Summarizer
             summarizer = Summarizer(self.config)
 
+            # Record feedback for learning
+            self.learning.record_feedback(
+                podcast_title=session["metadata"].title,
+                feedback_text=feedback,
+                feedback_type="edit",
+            )
+
+            # Track edit count for this session
+            session['edit_count'] = session.get('edit_count', 0) + 1
+
             email_content = await summarizer.generate_podcast_email(
                 transcript=session["transcript"],
                 metadata=session["metadata"],
@@ -642,6 +699,7 @@ class KnowledgeBot:
                 user_insights=session["user_insights"],
                 feedback=feedback,
                 previous_draft=session["draft_email"],
+                learned_preferences=self.learning.get_prompt_context(),
             )
 
             session["draft_email"] = email_content
@@ -1154,6 +1212,16 @@ class KnowledgeBot:
             from src.ai.summarizer import Summarizer
             summarizer = Summarizer(self.config)
 
+            # Record feedback for learning
+            self.learning.record_feedback(
+                podcast_title=session["metadata"].title,
+                feedback_text=feedback,
+                feedback_type="edit",
+            )
+
+            # Track edit count for this session
+            session['edit_count'] = session.get('edit_count', 0) + 1
+
             email_content = await summarizer.generate_podcast_email(
                 transcript=session["transcript"],
                 metadata=session["metadata"],
@@ -1161,6 +1229,7 @@ class KnowledgeBot:
                 user_insights=session.get("user_insights", []),
                 feedback=feedback,
                 previous_draft=session.get("draft_email"),
+                learned_preferences=self.learning.get_prompt_context(),
             )
 
             session["draft_email"] = email_content
@@ -1225,6 +1294,13 @@ class KnowledgeBot:
                 show_name=edit_info.get('show'),
             )
 
+            # Record feedback for learning
+            self.learning.record_feedback(
+                podcast_title=edit_info.get('title', 'Unknown'),
+                feedback_text=text,
+                feedback_type="edit",
+            )
+
             # Regenerate with feedback
             new_summary = await summarizer.generate_podcast_email(
                 transcript=transcript,
@@ -1233,6 +1309,7 @@ class KnowledgeBot:
                 user_insights=[],
                 feedback=text,
                 previous_draft=current_summary,
+                learned_preferences=self.learning.get_prompt_context(),
             )
 
             # Show preview with approve/more feedback options
@@ -1450,6 +1527,7 @@ def main():
     # Add handlers
     application.add_handler(CommandHandler("start", bot.start))
     application.add_handler(CommandHandler("help", bot.help_command))
+    application.add_handler(CommandHandler("stats", bot.stats_command))
     application.add_handler(podcast_conv_handler)
     application.add_handler(CommandHandler("lookup", bot.lookup_command))
     application.add_handler(CommandHandler("note", bot.note_command))
