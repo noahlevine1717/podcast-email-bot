@@ -141,6 +141,8 @@ Email clients render HTML better than plain text. The bot converts markdown form
 | `/help` | Show available commands |
 | `/podcast <url>` | Process a podcast |
 | `/lookup` | Browse saved summaries |
+| `/status` | Check processing queue and active sessions |
+| `/stop` | Cancel all stuck processes and clear session state |
 | `/stats` | View learning statistics |
 | `/cancel` | Cancel current operation |
 
@@ -180,6 +182,48 @@ python -m src.bot
 # Or with explicit path
 python -m src.bot --config config.yaml
 ```
+
+### Keeping the Bot Running (Phone Access)
+
+Since the bot runs locally on your Mac, it will stop responding if your Mac sleeps. To use the bot from your phone:
+
+**Option 1: Prevent Mac Sleep (Quick Fix)**
+```bash
+# Keep Mac awake while bot runs (run in separate terminal)
+caffeinate -i python -m src.bot
+```
+
+Or in System Settings → Energy → Turn off "Put hard disks to sleep" and set display sleep but not system sleep.
+
+**Option 2: Run as Background Service**
+```bash
+# Run with nohup to survive terminal close
+nohup python -m src.bot > bot.log 2>&1 &
+
+# Check if running
+ps aux | grep "src.bot"
+
+# Stop the bot
+pkill -f "src.bot"
+```
+
+**Option 3: Supervisor Mode (Most Resource Efficient)**
+Run a lightweight supervisor that only starts the full bot when you need it:
+
+```bash
+# Start supervisor (uses ~5MB RAM when bot is off)
+caffeinate -i python3 -m src.supervisor &
+```
+
+Then control from Telegram:
+- `/poweron` - Start the full bot
+- `/poweroff` - Stop the bot to save resources
+- `/botstatus` - Check if bot is running
+
+The supervisor stays running 24/7 but uses minimal resources. The full bot only runs when you're actively using it.
+
+**Option 4: Deploy to Server (Best for 24/7 Access)**
+For reliable phone access, deploy to a cloud server (DigitalOcean, AWS, etc.) or a Raspberry Pi on your local network.
 
 ---
 

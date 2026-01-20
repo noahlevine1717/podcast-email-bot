@@ -72,12 +72,30 @@ class KnowledgeBot:
         # Key: user_id, Value: session data
         self.podcast_sessions = {}
 
+        # Power state - when False, only /poweron and /status work
+        self.is_powered_on = True
+
     def _check_access(self, update: Update) -> bool:
         """Check if the user is authorized. Returns True if allowed."""
         user = update.effective_user
         if not user:
             return False
         return self.access_control.is_allowed(user.id)
+
+    async def _check_power_and_access(self, update: Update, command_name: str = "") -> bool:
+        """Check both power state and access. Returns True if command should proceed."""
+        if not self._check_access(update):
+            await self._deny_access(update)
+            return False
+
+        if not self.is_powered_on:
+            await update.message.reply_text(
+                "🔴 Bot is in sleep mode (saving resources).\n\n"
+                "Use /poweron to wake it up."
+            )
+            return False
+
+        return True
 
     async def _deny_access(self, update: Update) -> None:
         """Send access denied message."""
@@ -139,9 +157,11 @@ class KnowledgeBot:
             "**Browse Past Summaries:**\n"
             "• `/lookup` - View your previous podcast summaries\n\n"
             "**Other:**\n"
-            "• `/status` - Check processing queue\n"
+            "• `/status` - Check bot status (works anytime)\n"
+            "• `/stop` - Cancel stuck processes\n"
+            "• `/poweron` / `/poweroff` - Wake/sleep the bot\n"
             "• `/stats` - View learning progress\n\n"
-            "**Tip:** Use Interactive mode to capture your key takeaways while listening!",
+            "**Tip:** Use /poweroff when done to save resources!",
             parse_mode="Markdown",
         )
 
@@ -181,8 +201,7 @@ class KnowledgeBot:
 
     async def podcast_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Handle /podcast command - starts the podcast conversation flow."""
-        if not self._check_access(update):
-            await self._deny_access(update)
+        if not await self._check_power_and_access(update):
             return ConversationHandler.END
 
         if not context.args:
@@ -366,6 +385,20 @@ class KnowledgeBot:
             return
 
         chat_id = session["chat_id"]
+
+        # Check if we have a valid transcript
+        if not session.get("transcript"):
+            logger.error(f"No transcript available for user {user_id}")
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text="❌ **Error:** Transcription failed - no transcript available.\n\n"
+                     "Please try again with `/podcast <url>`",
+                parse_mode="Markdown",
+            )
+            # Clean up the failed session
+            if user_id in self.podcast_sessions:
+                del self.podcast_sessions[user_id]
+            return
 
         try:
             from src.ai.summarizer import Summarizer
@@ -819,11 +852,64 @@ class KnowledgeBot:
             await update.message.reply_text(f"❌ Error processing thread: {sanitize_error_message(e)}")
 
 
+    def _escape_markdown(self, text: str) -> str:
+        """Escape special Markdown characters for Telegram."""
+        # Characters that need escaping in Telegram Markdown
+        special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        for char in special_chars:
+            text = text.replace(char, f'\\{char}')
+        return text
+
+    def _calculate_eta(self, item: dict) -> str:
+        """Calculate estimated time remaining until email is ready."""
+        import time
+
+        status = item['status']
+
+        if status == 'downloading':
+            return "downloading..."
+        elif status == 'complete':
+            return ""
+        elif status == 'error':
+            return "failed"
+        elif status == 'summarizing':
+            return "~30s left"
+        elif status != 'transcribing':
+            return ""
+
+        started_at = item.get('started_at')
+        duration_seconds = item.get('duration_seconds')
+
+        if not started_at or not duration_seconds:
+            return "calculating..."
+
+        # Transcription runs at ~0.8x realtime on CPU with base model
+        # So remaining transcription time = (podcast_duration * 0.8) - elapsed
+        # Plus ~30 seconds for AI summary generation
+        transcription_total = duration_seconds * 0.8
+        elapsed = time.time() - started_at
+        remaining_transcription = max(0, transcription_total - elapsed)
+
+        # Add 30 seconds for AI summary generation
+        remaining_total = remaining_transcription + 30
+
+        if remaining_total < 60:
+            return f"~{int(remaining_total)}s"
+        elif remaining_total < 3600:
+            return f"~{int(remaining_total / 60)}m"
+        else:
+            hours = int(remaining_total / 3600)
+            mins = int((remaining_total % 3600) / 60)
+            return f"~{hours}h {mins}m"
+
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /status command."""
+        """Handle /status command - always works, even in sleep mode."""
         if not self._check_access(update):
             await self._deny_access(update)
             return
+
+        # Power state
+        power_status = "🟢 AWAKE" if self.is_powered_on else "🔴 SLEEP MODE"
 
         # Get processing queue status
         podcast_queue = self.podcast_processor.get_queue_status()
@@ -831,19 +917,136 @@ class KnowledgeBot:
         # Get content counts
         total_items = self.vector_store.count()
 
-        status_msg = "📊 **Bot Status**\n\n"
-        status_msg += f"**Total content stored:** {total_items} items\n\n"
+        # Get active sessions
+        active_sessions = len(self.podcast_sessions)
+
+        # Count saved summaries
+        summary_count = len(self.summary_storage.list_summaries(limit=1000))
+
+        status_msg = f"📊 Bot Status: {power_status}\n\n"
+        status_msg += f"Saved summaries: {summary_count}\n"
+        status_msg += f"Active sessions: {active_sessions}\n"
 
         if podcast_queue:
-            status_msg += "**Podcast Queue:**\n"
+            status_msg += "\nProcessing Queue:\n"
             for item in podcast_queue:
-                status_msg += f"• {item['title']}: {item['status']}\n"
+                title = item['title'][:35] + "..." if len(item['title']) > 35 else item['title']
+                eta = self._calculate_eta(item)
+                if eta:
+                    status_msg += f"• {title}\n  ⏳ {item['status']} ({eta})\n"
+                else:
+                    status_msg += f"• {title}: {item['status']}\n"
+
+        if self.is_powered_on:
+            status_msg += "\nCommands: /podcast, /lookup, /stop, /poweroff"
         else:
-            status_msg += "No items in processing queue.\n"
+            status_msg += "\nUse /poweron to wake the bot."
 
-        status_msg += f"\n**Daily digest:** {self.config.digest.time} ({self.config.digest.timezone})"
+        await update.message.reply_text(status_msg)
 
-        await update.message.reply_text(status_msg, parse_mode="Markdown")
+    async def stop_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /stop command - cancel all active processes for this user."""
+        if not self._check_access(update):
+            await self._deny_access(update)
+            return
+
+        user_id = update.effective_user.id
+        cancelled = []
+
+        # Clear podcast session
+        if user_id in self.podcast_sessions:
+            session = self.podcast_sessions[user_id]
+            title = session.get("metadata", {})
+            if hasattr(title, "title"):
+                title = title.title
+            else:
+                title = session.get("url", "Unknown")[:30]
+            del self.podcast_sessions[user_id]
+            cancelled.append(f"Podcast session: {title}")
+
+        # Clear feedback state
+        if hasattr(self, '_feedback_state') and user_id in self._feedback_state:
+            del self._feedback_state[user_id]
+            cancelled.append("Feedback input mode")
+
+        # Clear edit state
+        if hasattr(self, '_edit_state') and user_id in self._edit_state:
+            del self._edit_state[user_id]
+            cancelled.append("Edit mode")
+
+        # Clear email state
+        if hasattr(self, '_email_state') and user_id in self._email_state:
+            del self._email_state[user_id]
+            cancelled.append("Email input mode")
+
+        # Clear lookup state
+        if hasattr(self, '_lookup_state') and user_id in self._lookup_state:
+            del self._lookup_state[user_id]
+            cancelled.append("Lookup mode")
+
+        # Clear saved summaries selection
+        if hasattr(self, '_saved_summaries') and user_id in self._saved_summaries:
+            del self._saved_summaries[user_id]
+
+        # Clear items from processor queue for this user (if trackable)
+        # Note: We can't easily track which queue items belong to which user
+        # but clearing the session should stop new callbacks from being processed
+
+        if cancelled:
+            msg = "🛑 Stopped:\n" + "\n".join(f"• {item}" for item in cancelled)
+            msg += "\n\nYou can start fresh with /podcast"
+        else:
+            msg = "✓ No active processes to stop.\n\nUse /podcast to start a new session."
+
+        await update.message.reply_text(msg)
+
+    async def poweron_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /poweron command - wake the bot from sleep mode."""
+        if not self._check_access(update):
+            await self._deny_access(update)
+            return
+
+        if self.is_powered_on:
+            await update.message.reply_text(
+                "🟢 Bot is already awake!\n\n"
+                "Use /podcast <url> to process a podcast.\n"
+                "Use /poweroff when done to save resources."
+            )
+        else:
+            self.is_powered_on = True
+            await update.message.reply_text(
+                "🟢 Bot is now awake!\n\n"
+                "Use /podcast <url> to process a podcast.\n"
+                "Use /poweroff when done to save resources."
+            )
+
+    async def poweroff_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /poweroff command - put bot in sleep mode to save resources."""
+        if not self._check_access(update):
+            await self._deny_access(update)
+            return
+
+        user_id = update.effective_user.id
+
+        # Clear any active sessions for this user first
+        if user_id in self.podcast_sessions:
+            del self.podcast_sessions[user_id]
+
+        # Unload heavy resources
+        self.podcast_processor.unload_whisper_model()
+
+        if not self.is_powered_on:
+            await update.message.reply_text(
+                "🔴 Bot is already in sleep mode.\n\n"
+                "Use /poweron to wake it up."
+            )
+        else:
+            self.is_powered_on = False
+            await update.message.reply_text(
+                "🔴 Bot is now in sleep mode (saving resources).\n\n"
+                "Only /poweron and /status will work.\n"
+                "Use /poweron when you're ready to process podcasts."
+            )
 
     async def digest_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /digest command to manually trigger digest."""
@@ -871,8 +1074,7 @@ class KnowledgeBot:
 
     async def lookup_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /lookup command to browse historical podcast summaries."""
-        if not self._check_access(update):
-            await self._deny_access(update)
+        if not await self._check_power_and_access(update):
             return
 
         # Get list of podcast summaries from storage
@@ -1578,6 +1780,9 @@ def main():
     application.add_handler(podcast_conv_handler)
     application.add_handler(CommandHandler("lookup", bot.lookup_command))
     application.add_handler(CommandHandler("status", bot.status_command))
+    application.add_handler(CommandHandler("stop", bot.stop_command))
+    application.add_handler(CommandHandler("poweron", bot.poweron_command))
+    application.add_handler(CommandHandler("poweroff", bot.poweroff_command))
     application.add_handler(CommandHandler("digest", bot.digest_command))
 
     # Handle podcast approve/feedback callbacks (standalone, outside ConversationHandler)

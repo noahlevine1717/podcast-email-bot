@@ -63,6 +63,8 @@ class QueueItem:
     status: str = "queued"  # queued, downloading, transcribing, summarizing, complete, error
     progress: float = 0.0
     error: Optional[str] = None
+    started_at: Optional[float] = None  # timestamp when processing started
+    duration_seconds: Optional[int] = None  # podcast duration in seconds
 
 
 class PodcastProcessor:
@@ -104,6 +106,16 @@ class PodcastProcessor:
             return torch.cuda.is_available()
         except ImportError:
             return False
+
+    def unload_whisper_model(self) -> None:
+        """Unload Whisper model to free memory."""
+        if self._whisper_model is not None:
+            logger.info("Unloading Whisper model to free memory")
+            del self._whisper_model
+            self._whisper_model = None
+            # Force garbage collection
+            import gc
+            gc.collect()
 
     def _get_summarizer(self):
         """Lazy load Claude summarizer."""
@@ -255,6 +267,8 @@ class PodcastProcessor:
 
             # Step 2: Transcribe
             queue_item.status = "transcribing"
+            queue_item.duration_seconds = duration
+            queue_item.started_at = datetime.now().timestamp()
             await report_status(
                 f"🎙️ **Step 2/3:** Transcribing audio...\n"
                 f"Duration: {duration_str}\n"
@@ -283,7 +297,14 @@ class PodcastProcessor:
             queue_item.error = str(e)
             raise
         finally:
-            asyncio.create_task(self._remove_from_queue(item_id, delay=300))
+            # Unload Whisper model to free memory after transcription
+            self.unload_whisper_model()
+            # Remove from queue after delay (handle case where event loop might not be running)
+            try:
+                asyncio.create_task(self._remove_from_queue(item_id, delay=300))
+            except RuntimeError:
+                # No event loop running, just remove synchronously
+                self.queue = [item for item in self.queue if item.id != item_id]
 
     async def _download_audio(self, url: str) -> tuple[Path, PodcastMetadata]:
         """Download audio from URL and extract metadata."""
@@ -787,6 +808,8 @@ class PodcastProcessor:
                 "status": item.status,
                 "progress": item.progress,
                 "error": item.error,
+                "started_at": item.started_at,
+                "duration_seconds": item.duration_seconds,
             }
             for item in self.queue
         ]
