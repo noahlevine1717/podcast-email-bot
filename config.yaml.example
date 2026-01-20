@@ -22,12 +22,19 @@ ai:
   model: "claude-sonnet-4-20250514"
 
 whisper:
-  # Whisper model size for transcription
-  # Options: tiny (fastest), base, small, medium, large-v3 (most accurate)
-  model_size: "base"
+  # Transcription mode: "local" (faster-whisper) or "cloud" (OpenAI Whisper API)
+  # - local: Free, runs on your machine, requires good CPU/GPU
+  # - cloud: Fast, works even on slow machines, costs ~$0.006/min
+  mode: "local"
 
-  # Device for Whisper inference
-  # Options: auto, cpu, cuda (for NVIDIA GPUs)
+  # OpenAI API key (required if mode: "cloud")
+  # Get from platform.openai.com/api-keys
+  openai_api_key: ""
+
+  # Local mode settings (only used if mode: "local")
+  # Model size options: tiny (fastest), base, small, medium, large-v3 (most accurate)
+  model_size: "base"
+  # Device options: auto, cpu, cuda (for NVIDIA GPUs)
   device: "auto"
 
 digest:
