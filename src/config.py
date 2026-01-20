@@ -33,8 +33,15 @@ class AIConfig(BaseModel):
 class WhisperConfig(BaseModel):
     """Whisper transcription configuration."""
 
+    # Mode: "local" for faster-whisper, "cloud" for OpenAI Whisper API
+    mode: Literal["local", "cloud"] = "local"
+
+    # Local mode settings
     model_size: Literal["tiny", "base", "small", "medium", "large-v3"] = "base"
     device: str = "auto"
+
+    # Cloud mode settings (OpenAI Whisper API)
+    openai_api_key: str = ""
 
 
 class DigestConfig(BaseModel):

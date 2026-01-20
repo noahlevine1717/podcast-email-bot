@@ -873,7 +873,7 @@ class KnowledgeBot:
         elif status == 'error':
             return "failed"
         elif status == 'summarizing':
-            return "~30s left"
+            return "~30s"
         elif status != 'transcribing':
             return ""
 
@@ -883,15 +883,19 @@ class KnowledgeBot:
         if not started_at or not duration_seconds:
             return "calculating..."
 
-        # Transcription runs at ~0.8x realtime on CPU with base model
-        # So remaining transcription time = (podcast_duration * 0.8) - elapsed
-        # Plus ~30 seconds for AI summary generation
-        transcription_total = duration_seconds * 0.8
         elapsed = time.time() - started_at
-        remaining_transcription = max(0, transcription_total - elapsed)
 
-        # Add 30 seconds for AI summary generation
-        remaining_total = remaining_transcription + 30
+        # Check if using cloud transcription (much faster)
+        if self.config.whisper.mode == "cloud":
+            # Cloud: ~1 min per 30 min of audio + 30s for summary
+            transcription_total = (duration_seconds / 30) * 60  # ~2x faster than realtime
+            remaining_transcription = max(0, transcription_total - elapsed)
+            remaining_total = remaining_transcription + 30
+        else:
+            # Local: ~0.8x realtime on CPU with base model
+            transcription_total = duration_seconds * 0.8
+            remaining_transcription = max(0, transcription_total - elapsed)
+            remaining_total = remaining_transcription + 30
 
         if remaining_total < 60:
             return f"~{int(remaining_total)}s"

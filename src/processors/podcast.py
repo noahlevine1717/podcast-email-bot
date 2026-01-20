@@ -675,9 +675,103 @@ class PodcastProcessor:
         return audio_path
 
     async def _transcribe(self, audio_path: Path) -> list[TranscriptSegment]:
-        """Transcribe audio file using Whisper."""
+        """Transcribe audio file using Whisper (local or cloud)."""
         logger.info(f"Transcribing: {audio_path}")
 
+        # Check if we should use cloud transcription
+        if self.config.whisper.mode == "cloud":
+            return await self._transcribe_cloud(audio_path)
+        else:
+            return await self._transcribe_local(audio_path)
+
+    async def _compress_audio_for_cloud(self, audio_path: Path) -> Path:
+        """Compress audio to under 25MB for OpenAI API limit."""
+        import subprocess
+
+        file_size_mb = audio_path.stat().st_size / (1024 * 1024)
+        logger.info(f"Original audio size: {file_size_mb:.1f}MB")
+
+        # OpenAI limit is 25MB, target 20MB to be safe
+        if file_size_mb <= 20:
+            return audio_path
+
+        # Compress using ffmpeg - mono, 16kHz (Whisper's native rate), low bitrate
+        compressed_path = audio_path.with_suffix('.compressed.mp3')
+
+        # Calculate target bitrate based on file size
+        # Target ~20MB, audio duration estimated from file size
+        target_bitrate = "32k"  # Very compressed but sufficient for speech
+
+        cmd = [
+            "ffmpeg", "-y", "-i", str(audio_path),
+            "-ac", "1",           # Mono
+            "-ar", "16000",       # 16kHz (Whisper's native sample rate)
+            "-b:a", target_bitrate,
+            "-map", "0:a",        # Audio only
+            str(compressed_path)
+        ]
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, capture_output=True, check=True)
+        )
+
+        compressed_size_mb = compressed_path.stat().st_size / (1024 * 1024)
+        logger.info(f"Compressed audio size: {compressed_size_mb:.1f}MB")
+
+        # Clean up original if compression worked
+        if compressed_path.exists() and compressed_size_mb < file_size_mb:
+            audio_path.unlink()
+            return compressed_path
+
+        return audio_path
+
+    async def _transcribe_cloud(self, audio_path: Path) -> list[TranscriptSegment]:
+        """Transcribe using OpenAI Whisper API (fast, cloud-based)."""
+        import openai
+
+        logger.info("Using OpenAI Whisper API for transcription")
+
+        # Compress audio if needed (OpenAI has 25MB limit)
+        audio_path = await self._compress_audio_for_cloud(audio_path)
+
+        client = openai.OpenAI(api_key=self.config.whisper.openai_api_key)
+
+        loop = asyncio.get_event_loop()
+
+        def run_cloud_transcription():
+            with open(audio_path, "rb") as audio_file:
+                # Use whisper-1 model with verbose_json for timestamps
+                response = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment"],
+                )
+            return response
+
+        response = await loop.run_in_executor(None, run_cloud_transcription)
+
+        # Convert OpenAI response to our TranscriptSegment format
+        segments = []
+        if hasattr(response, 'segments') and response.segments:
+            for seg in response.segments:
+                text = seg.get('text', '').strip() if isinstance(seg, dict) else getattr(seg, 'text', '').strip()
+                start = seg.get('start', 0) if isinstance(seg, dict) else getattr(seg, 'start', 0)
+                end = seg.get('end', 0) if isinstance(seg, dict) else getattr(seg, 'end', 0)
+                if text:
+                    segments.append(TranscriptSegment(text=text, start=start, end=end))
+        else:
+            # Fallback: create single segment from full text
+            text = response.text if hasattr(response, 'text') else str(response)
+            segments.append(TranscriptSegment(text=text.strip(), start=0, end=0))
+
+        logger.info(f"Cloud transcribed {len(segments)} segments")
+        return segments
+
+    async def _transcribe_local(self, audio_path: Path) -> list[TranscriptSegment]:
+        """Transcribe using local faster-whisper (slower, no API cost)."""
         model = self._get_whisper_model()
 
         loop = asyncio.get_event_loop()
@@ -702,7 +796,7 @@ class PodcastProcessor:
             if seg.text.strip()
         ]
 
-        logger.info(f"Transcribed {len(segments)} segments")
+        logger.info(f"Local transcribed {len(segments)} segments")
         return segments
 
     def _segments_to_text(self, segments: list[TranscriptSegment]) -> str:
