@@ -1,11 +1,11 @@
 # Podcast Knowledge Bot
 
-A Telegram bot that transforms podcast episodes into professional email-style summaries using local Whisper transcription and Claude AI.
+A Telegram bot that transforms podcast episodes into professional email-style summaries using Whisper transcription (local or cloud) and Claude AI.
 
 ## What It Does
 
 1. **Send a podcast link** (Spotify, Apple Podcasts, or RSS feed URL)
-2. **Bot transcribes** the audio locally using OpenAI Whisper
+2. **Bot transcribes** the audio using Whisper (local or OpenAI cloud API)
 3. **Claude AI generates** a professional email-style summary with:
    - Key discussion points
    - Notable soundbites with timestamps
@@ -15,7 +15,7 @@ A Telegram bot that transforms podcast episodes into professional email-style su
 
 ## Features
 
-- **Local transcription** - Your audio never leaves your machine (uses Whisper)
+- **Flexible transcription** - Choose local (free, private) or cloud (fast, ~$0.006/min)
 - **AI-powered summaries** - Professional, email-ready format via Claude
 - **Interactive editing** - Refine summaries with natural language feedback
 - **Persistent storage** - All summaries saved and searchable via Telegram
@@ -30,6 +30,7 @@ A Telegram bot that transforms podcast episodes into professional email-style su
 - A Telegram account
 - An Anthropic API key ([get one here](https://console.anthropic.com))
 - FFmpeg installed (`brew install ffmpeg` on macOS)
+- **For cloud transcription:** OpenAI API key ([get one here](https://platform.openai.com/api-keys))
 
 ### Installation
 
@@ -97,8 +98,10 @@ obsidian:
   vault_path: "/path/to/data/directory"  # Where to store data files
 
 whisper:
-  model_size: "base"  # Options: tiny, base, small, medium, large-v3
-  device: "auto"      # Options: auto, cpu, cuda
+  mode: "local"       # "local" (free) or "cloud" (fast, uses OpenAI API)
+  openai_api_key: ""  # Required only if mode: "cloud"
+  model_size: "base"  # Local mode: tiny, base, small, medium, large-v3
+  device: "auto"      # Local mode: auto, cpu, cuda
 
 # Email via Resend (recommended - easiest setup)
 email:
@@ -174,9 +177,31 @@ Note: Gmail requires an [App Password](https://myaccount.google.com/apppasswords
 - **RSS Feeds** - Direct feed URLs
 - **Direct audio URLs** - MP3/M4A links
 
-## Hardware Requirements
+## Transcription Modes
 
-Whisper model requirements (for transcription):
+### Cloud Mode (Recommended for most users)
+Uses OpenAI's Whisper API - fast and works on any machine.
+
+```yaml
+whisper:
+  mode: "cloud"
+  openai_api_key: "sk-proj-..."  # Get from platform.openai.com/api-keys
+```
+
+**Pros:** Fast (~30 seconds for 1-hour podcast), no hardware requirements
+**Cons:** Costs ~$0.006/minute (~$0.36 for 1-hour podcast)
+
+### Local Mode (Free, privacy-focused)
+Runs Whisper on your machine - free but requires decent hardware.
+
+```yaml
+whisper:
+  mode: "local"
+  model_size: "base"  # tiny, base, small, medium, large-v3
+  device: "auto"      # auto, cpu, cuda
+```
+
+**Local model requirements:**
 
 | Model | VRAM/RAM | Speed | Accuracy |
 |-------|----------|-------|----------|
@@ -186,14 +211,16 @@ Whisper model requirements (for transcription):
 | `medium` | ~5GB | Slow | Great |
 | `large-v3` | ~10GB | Slowest | Best |
 
-**Recommendation**: Start with `base` for a good balance. Use `tiny` if you have limited resources, or `medium`/`large-v3` for better accuracy if you have a GPU.
+**Pros:** Free, audio stays on your machine
+**Cons:** Slower (real-time or longer), requires good CPU/GPU
 
 ## Troubleshooting
 
 ### "Podcast transcription is slow"
-- Use a smaller Whisper model in config (`tiny` or `base`)
+- **Switch to cloud mode** - Set `mode: "cloud"` for fastest results
+- Use a smaller Whisper model in local mode (`tiny` or `base`)
 - If you have an NVIDIA GPU, set `device: "cuda"`
-- Long podcasts (2+ hours) take proportionally longer
+- Long podcasts (2+ hours) take proportionally longer in local mode
 
 ### "Can't find audio for Spotify podcast"
 - Some Spotify podcasts are DRM-protected
