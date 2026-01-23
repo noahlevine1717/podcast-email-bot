@@ -777,6 +777,14 @@ class KnowledgeBot:
         await update.message.reply_text("❌ Podcast session cancelled.")
         return ConversationHandler.END
 
+    async def podcast_timeout(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle conversation timeout - clean up stale sessions."""
+        user_id = update.effective_user.id if update.effective_user else None
+        if user_id and user_id in self.podcast_sessions:
+            del self.podcast_sessions[user_id]
+        logger.info(f"Podcast conversation timed out for user {user_id}")
+        return ConversationHandler.END
+
     async def article_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /article command."""
         if not self._check_access(update):
@@ -1771,10 +1779,14 @@ def main():
                 CallbackQueryHandler(bot.podcast_review_callback, pattern="^podcast_"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bot.podcast_feedback_text),
             ],
+            ConversationHandler.TIMEOUT: [
+                MessageHandler(filters.ALL, bot.podcast_timeout),
+            ],
         },
         fallbacks=[CommandHandler("cancel", bot.podcast_cancel)],
         per_user=True,
         per_chat=True,
+        conversation_timeout=600,  # 10 minute timeout to prevent stuck states
     )
 
     # Add handlers

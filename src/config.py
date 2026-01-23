@@ -93,24 +93,71 @@ class Config(BaseModel):
 
     @classmethod
     def load(cls, config_path: Path | str = "config.yaml") -> "Config":
-        """Load configuration from YAML file.
+        """Load configuration from YAML file or environment variables.
 
-        Secrets can be overridden via environment variables:
-        - TELEGRAM_BOT_TOKEN
-        - ANTHROPIC_API_KEY
+        If config.yaml exists, loads from file with env var overrides.
+        If no config.yaml, builds config entirely from environment variables:
+        - TELEGRAM_BOT_TOKEN (required)
+        - TELEGRAM_ALLOWED_USERS (comma-separated user IDs)
+        - ANTHROPIC_API_KEY (required)
+        - AI_MODEL (default: claude-sonnet-4-20250514)
+        - WHISPER_MODE (local/cloud, default: cloud)
+        - OPENAI_API_KEY (required if whisper mode is cloud)
+        - VAULT_PATH (default: /data/vault)
+        - DIGEST_TIME (default: 20:00)
+        - DIGEST_TIMEZONE (default: America/Los_Angeles)
+        - RESEND_API_KEY (optional)
+        - EMAIL_ENABLED (optional, true/false)
         """
         config_path = Path(config_path)
-        if not config_path.exists():
-            raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
-        with open(config_path) as f:
-            data = yaml.safe_load(f)
+        if config_path.exists():
+            with open(config_path) as f:
+                data = yaml.safe_load(f)
+        elif os.environ.get("TELEGRAM_BOT_TOKEN"):
+            # Build config entirely from environment variables
+            allowed_users = []
+            if os.environ.get("TELEGRAM_ALLOWED_USERS"):
+                allowed_users = [int(x.strip()) for x in os.environ["TELEGRAM_ALLOWED_USERS"].split(",")]
+
+            data = {
+                "telegram": {
+                    "bot_token": os.environ["TELEGRAM_BOT_TOKEN"],
+                    "allowed_users": allowed_users,
+                },
+                "obsidian": {
+                    "vault_path": os.environ.get("VAULT_PATH", "/data/vault"),
+                },
+                "ai": {
+                    "anthropic_api_key": os.environ["ANTHROPIC_API_KEY"],
+                    "model": os.environ.get("AI_MODEL", "claude-sonnet-4-20250514"),
+                },
+                "whisper": {
+                    "mode": os.environ.get("WHISPER_MODE", "cloud"),
+                    "openai_api_key": os.environ.get("OPENAI_API_KEY", ""),
+                },
+                "digest": {
+                    "time": os.environ.get("DIGEST_TIME", "20:00"),
+                    "timezone": os.environ.get("DIGEST_TIMEZONE", "America/Los_Angeles"),
+                },
+                "email": {
+                    "enabled": os.environ.get("EMAIL_ENABLED", "false").lower() == "true",
+                    "resend_api_key": os.environ.get("RESEND_API_KEY", ""),
+                },
+            }
+        else:
+            raise FileNotFoundError(
+                f"Configuration file not found: {config_path}\n"
+                "Either create config.yaml or set TELEGRAM_BOT_TOKEN environment variable."
+            )
 
         # Override secrets from environment variables if present
         if os.environ.get("TELEGRAM_BOT_TOKEN"):
             data["telegram"]["bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
         if os.environ.get("ANTHROPIC_API_KEY"):
             data["ai"]["anthropic_api_key"] = os.environ["ANTHROPIC_API_KEY"]
+        if os.environ.get("OPENAI_API_KEY"):
+            data.setdefault("whisper", {})["openai_api_key"] = os.environ["OPENAI_API_KEY"]
 
         return cls.model_validate(data)
 
