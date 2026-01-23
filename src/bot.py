@@ -1757,8 +1757,9 @@ def main():
 
     # Startup info
     groq_configured = bool(config.whisper.groq_api_key)
+    openai_configured = bool(config.whisper.openai_api_key) and not config.whisper.openai_api_key.startswith("gsk_")
     user_count = len(config.telegram.allowed_users)
-    logger.info(f"Whisper mode: {config.whisper.mode}, Groq configured: {groq_configured}, allowed users: {user_count}")
+    logger.info(f"Whisper mode: {config.whisper.mode}, Groq configured: {groq_configured}, OpenAI fallback: {openai_configured}, allowed users: {user_count}")
 
     # Create bot instance
     bot = KnowledgeBot()
