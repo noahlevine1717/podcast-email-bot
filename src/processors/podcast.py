@@ -330,7 +330,7 @@ class PodcastProcessor:
         rss_indicators = [".xml", "/feed", "/rss", "feed=", "format=rss"]
         return any(indicator in url.lower() for indicator in rss_indicators)
 
-    async def _download_from_rss(self, feed_url: str, episode_index: int = 0) -> tuple[Path, PodcastMetadata]:
+    async def _download_from_rss(self, feed_url: str, episode_index: int = 0, episode_title: str | None = None) -> tuple[Path, PodcastMetadata]:
         """Download from an RSS feed (most reliable method)."""
         logger.info(f"Parsing RSS feed: {feed_url}")
 
@@ -350,7 +350,16 @@ class PodcastProcessor:
         if not feed.entries:
             raise ValueError("No episodes found in RSS feed")
 
-        episode = feed.entries[episode_index]
+        # If episode_title is provided, search for matching episode
+        if episode_title:
+            episode = self._find_episode_by_title(feed.entries, episode_title)
+            if episode:
+                logger.info(f"Matched episode by title: {episode.get('title', 'Unknown')}")
+            else:
+                logger.warning(f"Could not match episode '{episode_title}', using latest")
+                episode = feed.entries[episode_index]
+        else:
+            episode = feed.entries[episode_index]
 
         # Extract metadata
         metadata = PodcastMetadata(
@@ -388,6 +397,45 @@ class PodcastProcessor:
 
         return audio_path, metadata
 
+    def _find_episode_by_title(self, entries: list, target_title: str):
+        """Find an RSS episode matching the target title."""
+        target_lower = target_title.lower().strip()
+        # Try exact match first
+        for entry in entries:
+            if entry.get("title", "").lower().strip() == target_lower:
+                return entry
+        # Try substring match (title might be truncated or have extra info)
+        for entry in entries:
+            entry_title = entry.get("title", "").lower().strip()
+            if target_lower in entry_title or entry_title in target_lower:
+                return entry
+        # Try word-based matching (at least 60% of words match)
+        target_words = set(target_lower.split())
+        if len(target_words) >= 3:
+            for entry in entries:
+                entry_words = set(entry.get("title", "").lower().split())
+                overlap = len(target_words & entry_words)
+                if overlap >= len(target_words) * 0.6:
+                    return entry
+        return None
+
+    async def _get_episode_title_from_spotify(self, episode_id: str) -> str | None:
+        """Get the episode title from Spotify using oEmbed API."""
+        try:
+            episode_url = f"https://open.spotify.com/episode/{episode_id}"
+            oembed_url = f"https://open.spotify.com/oembed?url={episode_url}"
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(oembed_url)
+                if response.status_code == 200:
+                    data = response.json()
+                    title = data.get("title", "")
+                    if title:
+                        logger.info(f"Got episode title from Spotify: {title}")
+                        return title
+        except Exception as e:
+            logger.debug(f"Failed to get episode title from Spotify: {e}")
+        return None
+
     async def _download_from_spotify(self, url: str) -> tuple[Path, PodcastMetadata]:
         """Download from Spotify by finding the RSS feed."""
         logger.info(f"Processing Spotify URL: {url}")
@@ -406,12 +454,17 @@ class PodcastProcessor:
             elif part == "episode" and i + 1 < len(path_parts):
                 episode_id = path_parts[i + 1].split("?")[0]
 
+        # Get episode title for matching if we have an episode ID
+        episode_title = None
+        if episode_id:
+            episode_title = await self._get_episode_title_from_spotify(episode_id)
+
         # Try to find RSS feed using spotifeed service
         if show_id:
             rss_url = await self._find_rss_from_spotify(show_id)
             if rss_url:
                 logger.info(f"Found RSS feed: {rss_url}")
-                return await self._download_from_rss(rss_url)
+                return await self._download_from_rss(rss_url, episode_title=episode_title)
 
         # If we have an episode ID but no show ID, try to get show info from episode page
         if episode_id and not show_id:
@@ -421,7 +474,7 @@ class PodcastProcessor:
                 rss_url = await self._find_rss_from_spotify(show_id)
                 if rss_url:
                     logger.info(f"Found RSS feed from episode: {rss_url}")
-                    return await self._download_from_rss(rss_url)
+                    return await self._download_from_rss(rss_url, episode_title=episode_title)
 
             # If we still can't find the show, try yt-dlp as last resort
             try:
