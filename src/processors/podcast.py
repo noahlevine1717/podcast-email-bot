@@ -740,10 +740,8 @@ class PodcastProcessor:
 
         if use_groq:
             logger.info("Using Groq Whisper API for transcription (fast mode)")
-            # Groq has 100MB limit — only compress if over that
-            file_size_mb = audio_path.stat().st_size / (1024 * 1024)
-            if file_size_mb > 95:
-                audio_path = await self._compress_audio_for_cloud(audio_path)
+            # Groq has 25MB limit — always compress
+            audio_path = await self._compress_audio_for_cloud(audio_path)
             client = openai.OpenAI(
                 api_key=self.config.whisper.groq_api_key,
                 base_url="https://api.groq.com/openai/v1",
