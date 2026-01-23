@@ -33,15 +33,16 @@ class AIConfig(BaseModel):
 class WhisperConfig(BaseModel):
     """Whisper transcription configuration."""
 
-    # Mode: "local" for faster-whisper, "cloud" for OpenAI Whisper API
+    # Mode: "local" for faster-whisper, "cloud" for OpenAI/Groq Whisper API
     mode: Literal["local", "cloud"] = "local"
 
     # Local mode settings
     model_size: Literal["tiny", "base", "small", "medium", "large-v3"] = "base"
     device: str = "auto"
 
-    # Cloud mode settings (OpenAI Whisper API)
+    # Cloud mode settings
     openai_api_key: str = ""
+    groq_api_key: str = ""  # If set, uses Groq (faster + cheaper) instead of OpenAI
 
 
 class DigestConfig(BaseModel):
@@ -135,6 +136,7 @@ class Config(BaseModel):
                 "whisper": {
                     "mode": os.environ.get("WHISPER_MODE", "cloud"),
                     "openai_api_key": os.environ.get("OPENAI_API_KEY", "").strip(),
+                    "groq_api_key": os.environ.get("GROQ_API_KEY", "").strip(),
                 },
                 "digest": {
                     "time": os.environ.get("DIGEST_TIME", "20:00"),
@@ -158,6 +160,8 @@ class Config(BaseModel):
             data["ai"]["anthropic_api_key"] = os.environ["ANTHROPIC_API_KEY"].strip()
         if os.environ.get("OPENAI_API_KEY"):
             data.setdefault("whisper", {})["openai_api_key"] = os.environ["OPENAI_API_KEY"].strip()
+        if os.environ.get("GROQ_API_KEY"):
+            data.setdefault("whisper", {})["groq_api_key"] = os.environ["GROQ_API_KEY"].strip()
 
         return cls.model_validate(data)
 

@@ -733,23 +733,35 @@ class PodcastProcessor:
         return audio_path
 
     async def _transcribe_cloud(self, audio_path: Path) -> list[TranscriptSegment]:
-        """Transcribe using OpenAI Whisper API (fast, cloud-based)."""
+        """Transcribe using Groq or OpenAI Whisper API (fast, cloud-based)."""
         import openai
 
-        logger.info("Using OpenAI Whisper API for transcription")
+        use_groq = bool(self.config.whisper.groq_api_key)
 
-        # Compress audio if needed (OpenAI has 25MB limit)
-        audio_path = await self._compress_audio_for_cloud(audio_path)
-
-        client = openai.OpenAI(api_key=self.config.whisper.openai_api_key)
+        if use_groq:
+            logger.info("Using Groq Whisper API for transcription (fast mode)")
+            # Groq has 100MB limit — only compress if over that
+            file_size_mb = audio_path.stat().st_size / (1024 * 1024)
+            if file_size_mb > 95:
+                audio_path = await self._compress_audio_for_cloud(audio_path)
+            client = openai.OpenAI(
+                api_key=self.config.whisper.groq_api_key,
+                base_url="https://api.groq.com/openai/v1",
+            )
+            model = "whisper-large-v3-turbo"
+        else:
+            logger.info("Using OpenAI Whisper API for transcription")
+            # OpenAI has 25MB limit
+            audio_path = await self._compress_audio_for_cloud(audio_path)
+            client = openai.OpenAI(api_key=self.config.whisper.openai_api_key)
+            model = "whisper-1"
 
         loop = asyncio.get_event_loop()
 
         def run_cloud_transcription():
             with open(audio_path, "rb") as audio_file:
-                # Use whisper-1 model with verbose_json for timestamps
                 response = client.audio.transcriptions.create(
-                    model="whisper-1",
+                    model=model,
                     file=audio_file,
                     response_format="verbose_json",
                     timestamp_granularities=["segment"],
