@@ -665,12 +665,13 @@ class PodcastProcessor:
         safe_title = re.sub(r'[<>:"/\\|?*]', "", title)[:50]
         audio_path = temp_dir / f"{safe_title}.mp3"
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, follow_redirects=True)
-            response.raise_for_status()
-
-            with open(audio_path, "wb") as f:
-                f.write(response.content)
+        timeout = httpx.Timeout(10.0, read=300.0)  # 5 min read timeout for large files
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with client.stream("GET", url) as response:
+                response.raise_for_status()
+                with open(audio_path, "wb") as f:
+                    async for chunk in response.aiter_bytes(chunk_size=65536):
+                        f.write(chunk)
 
         return audio_path
 
