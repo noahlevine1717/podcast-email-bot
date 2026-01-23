@@ -16,5 +16,6 @@ COPY src/ src/
 
 # Create data directory for persistent storage
 RUN mkdir -p /data/vault/content/podcasts /data/vault/content/articles /data/vault/content/threads
+ENV VAULT_PATH=/data/vault
 
 CMD ["python", "-m", "src.bot"]

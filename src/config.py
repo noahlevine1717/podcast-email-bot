@@ -140,7 +140,7 @@ class Config(BaseModel):
                     "allowed_users": allowed_users,
                 },
                 "obsidian": {
-                    "vault_path": os.environ.get("VAULT_PATH", "/data/vault"),
+                    "vault_path": os.environ.get("VAULT_PATH", "./data"),
                 },
                 "ai": {
                     "anthropic_api_key": os.environ["ANTHROPIC_API_KEY"].strip(),

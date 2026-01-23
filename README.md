@@ -48,13 +48,18 @@ Send a podcast link, get back a structured summary with key points, notable quot
    cd knowledge-bot
    python -m venv venv
    source venv/bin/activate
-   pip install -e .
+   pip install -r requirements.txt
    ```
 
-3. **Configure**:
+3. **Configure** (pick one):
    ```bash
+   # Option A: YAML config file
    cp config.yaml.example config.yaml
    # Edit config.yaml with your API keys
+
+   # Option B: Environment variables
+   cp .env.example .env
+   # Edit .env with your API keys, then: source .env
    ```
 
 4. **Run**:
@@ -163,8 +168,10 @@ knowledge-bot/
 │       └── summaries.py      # JSON-based persistence
 ├── Dockerfile                # Cloud deployment (Railway)
 ├── railway.toml              # Railway config
+├── requirements.txt          # Full local dependencies
 ├── requirements-cloud.txt    # Cloud-only dependencies (no PyTorch)
-├── config.yaml.example       # Configuration template
+├── config.yaml.example       # Configuration template (YAML)
+├── .env.example              # Configuration template (env vars)
 └── README.md
 ```
 

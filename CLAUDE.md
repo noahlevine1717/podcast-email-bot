@@ -52,9 +52,11 @@ A Telegram bot that transforms podcast episodes into structured, email-ready sum
 | `src/storage/summaries.py` | JSON-based summary persistence |
 | `Dockerfile` | Cloud build - python:3.11-slim + ffmpeg, uses requirements-cloud.txt |
 | `railway.toml` | Railway deploy config (dockerfile builder, restart on failure) |
+| `requirements.txt` | Full local deps (includes faster-whisper, sentence-transformers) |
 | `requirements-cloud.txt` | Cloud deps (no PyTorch/faster-whisper for smaller image) |
+| `.env.example` | Env var template for local dev or Railway |
 | `config.yaml` | User configuration (gitignored - contains secrets) |
-| `config.yaml.example` | Template for configuration |
+| `config.yaml.example` | YAML config template |
 
 ---
 
