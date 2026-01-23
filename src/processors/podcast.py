@@ -785,27 +785,77 @@ class PodcastProcessor:
 
         return audio_path
 
+    def _has_openai_fallback(self) -> bool:
+        """Check if a real OpenAI key is available for fallback (not a Groq key)."""
+        key = self.config.whisper.openai_api_key
+        return bool(key) and not key.startswith("gsk_")
+
     async def _transcribe_cloud(self, audio_path: Path) -> list[TranscriptSegment]:
-        """Transcribe using Groq or OpenAI Whisper API (fast, cloud-based)."""
+        """Transcribe using Groq or OpenAI Whisper API (fast, cloud-based).
+
+        If Groq fails with 429 (rate limit) or 413 (file too large), automatically
+        falls back to OpenAI if a real OpenAI key is configured.
+        """
         import openai
 
         use_groq = bool(self.config.whisper.groq_api_key)
 
+        # Compress audio for cloud APIs (25MB limit)
+        audio_path = await self._compress_audio_for_cloud(audio_path)
+
         if use_groq:
-            logger.info("Using Groq Whisper API for transcription (fast mode)")
-            # Groq has 25MB limit — always compress
-            audio_path = await self._compress_audio_for_cloud(audio_path)
-            client = openai.OpenAI(
-                api_key=self.config.whisper.groq_api_key,
-                base_url="https://api.groq.com/openai/v1",
+            try:
+                return await self._call_whisper_api(
+                    audio_path,
+                    api_key=self.config.whisper.groq_api_key,
+                    base_url="https://api.groq.com/openai/v1",
+                    model="whisper-large-v3-turbo",
+                    provider="Groq",
+                )
+            except (openai.RateLimitError, openai.APIStatusError) as e:
+                status = getattr(e, 'status_code', None)
+                if status == 429 and self._has_openai_fallback():
+                    logger.warning(f"Groq rate limited, falling back to OpenAI: {e}")
+                elif status == 413 and self._has_openai_fallback():
+                    logger.warning(f"Groq file too large, falling back to OpenAI: {e}")
+                else:
+                    raise
+
+            # Fallback to OpenAI
+            logger.info("Falling back to OpenAI Whisper API")
+            return await self._call_whisper_api(
+                audio_path,
+                api_key=self.config.whisper.openai_api_key,
+                base_url=None,
+                model="whisper-1",
+                provider="OpenAI (fallback)",
             )
-            model = "whisper-large-v3-turbo"
         else:
-            logger.info("Using OpenAI Whisper API for transcription")
-            # OpenAI has 25MB limit
-            audio_path = await self._compress_audio_for_cloud(audio_path)
-            client = openai.OpenAI(api_key=self.config.whisper.openai_api_key)
-            model = "whisper-1"
+            return await self._call_whisper_api(
+                audio_path,
+                api_key=self.config.whisper.openai_api_key,
+                base_url=None,
+                model="whisper-1",
+                provider="OpenAI",
+            )
+
+    async def _call_whisper_api(
+        self,
+        audio_path: Path,
+        api_key: str,
+        base_url: str | None,
+        model: str,
+        provider: str,
+    ) -> list[TranscriptSegment]:
+        """Call a Whisper-compatible API and return transcript segments."""
+        import openai
+
+        logger.info(f"Using {provider} Whisper API for transcription")
+
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        client = openai.OpenAI(**client_kwargs)
 
         loop = asyncio.get_event_loop()
 
@@ -821,7 +871,7 @@ class PodcastProcessor:
 
         response = await loop.run_in_executor(None, run_cloud_transcription)
 
-        # Convert OpenAI response to our TranscriptSegment format
+        # Convert response to TranscriptSegment format
         segments = []
         if hasattr(response, 'segments') and response.segments:
             for seg in response.segments:
@@ -835,7 +885,7 @@ class PodcastProcessor:
             text = response.text if hasattr(response, 'text') else str(response)
             segments.append(TranscriptSegment(text=text.strip(), start=0, end=0))
 
-        logger.info(f"Cloud transcribed {len(segments)} segments")
+        logger.info(f"{provider} transcribed {len(segments)} segments")
         return segments
 
     async def _transcribe_local(self, audio_path: Path) -> list[TranscriptSegment]:
