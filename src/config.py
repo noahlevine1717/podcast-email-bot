@@ -87,7 +87,13 @@ def _get_groq_key() -> str:
     val = os.environ.get("GROQ_API_KEY", "").strip()
     if val.startswith("gsk_"):
         return val
-    # Backward compat: OPENAI_API_KEY starting with gsk_ (Railway deployments)
+    # Backward compat: WHISPER_MODE=groq:gsk_... (legacy Railway format)
+    whisper_mode = os.environ.get("WHISPER_MODE", "").strip()
+    if whisper_mode.startswith("groq:"):
+        key = whisper_mode[5:].strip()
+        if key.startswith("gsk_"):
+            return key
+    # Backward compat: OPENAI_API_KEY starting with gsk_
     openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if openai_key.startswith("gsk_"):
         return openai_key
@@ -147,7 +153,7 @@ class Config(BaseModel):
                     "model": os.environ.get("AI_MODEL", "claude-sonnet-4-20250514"),
                 },
                 "whisper": {
-                    "mode": os.environ.get("WHISPER_MODE", "cloud"),
+                    "mode": "cloud" if os.environ.get("WHISPER_MODE", "cloud").startswith("groq:") else os.environ.get("WHISPER_MODE", "cloud"),
                     "openai_api_key": os.environ.get("OPENAI_API_KEY", "").strip(),
                     "groq_api_key": _get_groq_key(),
                 },
