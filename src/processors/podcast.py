@@ -785,13 +785,25 @@ class PodcastProcessor:
 
         return audio_path
 
-    def _has_openai_fallback(self) -> bool:
-        """Check if a real OpenAI key is available for fallback (not a Groq key)."""
+    def _get_openai_fallback_key(self) -> str:
+        """Get a real OpenAI key for fallback (not a Groq key).
+
+        Checks OPENAI_WHISPER_KEY env var first, then config.whisper.openai_api_key.
+        """
+        import os
+        # Dedicated fallback env var (avoids Railway variable editing issues)
+        key = os.environ.get("OPENAI_WHISPER_KEY", "").strip()
+        if key and not key.startswith("gsk_"):
+            return key
+        # Config-loaded key
         key = self.config.whisper.openai_api_key
-        has_fallback = bool(key) and not key.startswith("gsk_")
-        if not has_fallback:
-            logger.warning(f"No OpenAI fallback available (key prefix: '{key[:8]}...' if set)" if key else "No OpenAI fallback available (key not set)")
-        return has_fallback
+        if key and not key.startswith("gsk_"):
+            return key
+        return ""
+
+    def _has_openai_fallback(self) -> bool:
+        """Check if a real OpenAI key is available for fallback."""
+        return bool(self._get_openai_fallback_key())
 
     async def _transcribe_cloud(self, audio_path: Path) -> list[TranscriptSegment]:
         """Transcribe using Groq or OpenAI Whisper API (fast, cloud-based).
@@ -825,10 +837,11 @@ class PodcastProcessor:
                     raise
 
             # Fallback to OpenAI
+            fallback_key = self._get_openai_fallback_key()
             logger.info("Falling back to OpenAI Whisper API")
             return await self._call_whisper_api(
                 audio_path,
-                api_key=self.config.whisper.openai_api_key,
+                api_key=fallback_key,
                 base_url=None,
                 model="whisper-1",
                 provider="OpenAI (fallback)",
