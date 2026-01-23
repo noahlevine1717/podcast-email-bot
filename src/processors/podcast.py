@@ -851,9 +851,11 @@ class PodcastProcessor:
                 provider="OpenAI (fallback)",
             )
         else:
+            # No Groq key — use OpenAI directly (check OPENAI_WHISPER_KEY too)
+            openai_key = self._get_openai_fallback_key() or self.config.whisper.openai_api_key
             return await self._call_whisper_api(
                 audio_path,
-                api_key=self.config.whisper.openai_api_key,
+                api_key=openai_key,
                 base_url=None,
                 model="whisper-1",
                 provider="OpenAI",

@@ -37,7 +37,7 @@ Send a podcast link, get back a structured summary with key points, notable quot
 
 4. Deploy - Railway auto-builds from the Dockerfile
 
-> **Note:** If you set `OPENAI_API_KEY` with a Groq key (starts with `gsk_`), it will be detected as Groq automatically. This is for backward compatibility.
+   That's it! The bot will use Groq for fast free transcription, with OpenAI as automatic fallback if you added `OPENAI_WHISPER_KEY`.
 
 ### Option B: Run Locally
 
@@ -75,28 +75,43 @@ Send a podcast link, get back a structured summary with key points, notable quot
 
 ## Getting Your Credentials
 
-| Credential | Where to get it |
-|------------|----------------|
-| Telegram Bot Token | Message [@BotFather](https://t.me/botfather), send `/newbot` |
-| Telegram User ID | Message [@userinfobot](https://t.me/userinfobot) |
-| Anthropic API Key | [console.anthropic.com](https://console.anthropic.com) → API Keys |
-| Groq API Key | [console.groq.com](https://console.groq.com) → API Keys (free) |
+| Credential | Where to get it | Looks like |
+|------------|----------------|------------|
+| Telegram Bot Token | Message [@BotFather](https://t.me/botfather), send `/newbot` | `123456789:ABCdef...` |
+| Telegram User ID | Message [@userinfobot](https://t.me/userinfobot) | `123456789` |
+| Anthropic API Key | [console.anthropic.com](https://console.anthropic.com) → API Keys | `sk-ant-...` |
+| Groq API Key | [console.groq.com](https://console.groq.com) → API Keys (free) | `gsk_...` |
+| OpenAI Key (optional) | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | `sk-proj-...` |
 
 ## Transcription Options
 
 ### Groq (Recommended)
-Free tier, very fast transcription. 25MB file size limit (bot auto-compresses audio to fit).
-If you also set `OPENAI_WHISPER_KEY`, the bot automatically falls back to OpenAI when Groq hits rate limits (429) or file size limits (413).
+Free tier, very fast. The bot auto-compresses audio to fit Groq's 25MB limit.
 
+Groq's free tier has an hourly audio limit (~2 hours of audio per hour). If you also set `OPENAI_WHISPER_KEY`, the bot **automatically falls back to OpenAI** when Groq is rate-limited or the file is too large — no action needed from you.
+
+**Railway env vars:**
+```
+GROQ_API_KEY=gsk_...
+OPENAI_WHISPER_KEY=sk-proj-...   # optional fallback
+```
+
+**Local config.yaml:**
 ```yaml
 whisper:
   mode: "cloud"
   groq_api_key: "gsk_..."
 ```
 
-### OpenAI Whisper API
-Paid (~$0.006/min), no file size issues. Used as primary if no Groq key, or as automatic fallback.
+### OpenAI Only
+Paid (~$0.006/min), no file size or rate limit issues. Use this if you don't want a Groq account.
 
+**Railway env vars:**
+```
+OPENAI_WHISPER_KEY=sk-proj-...
+```
+
+**Local config.yaml:**
 ```yaml
 whisper:
   mode: "cloud"
