@@ -81,6 +81,18 @@ class EmailConfig(BaseModel):
     sender_password: str = ""
 
 
+def _get_groq_key() -> str:
+    """Get Groq API key from GROQ_API_KEY or detect if OPENAI_API_KEY is actually a Groq key."""
+    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if groq_key:
+        return groq_key
+    # Fallback: if OPENAI_API_KEY starts with gsk_, it's actually a Groq key
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if openai_key.startswith("gsk_"):
+        return openai_key
+    return ""
+
+
 class Config(BaseModel):
     """Main configuration container."""
 
@@ -136,7 +148,7 @@ class Config(BaseModel):
                 "whisper": {
                     "mode": os.environ.get("WHISPER_MODE", "cloud"),
                     "openai_api_key": os.environ.get("OPENAI_API_KEY", "").strip(),
-                    "groq_api_key": os.environ.get("GROQ_API_KEY", "").strip(),
+                    "groq_api_key": _get_groq_key(),
                 },
                 "digest": {
                     "time": os.environ.get("DIGEST_TIME", "20:00"),
