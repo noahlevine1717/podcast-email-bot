@@ -665,14 +665,18 @@ class PodcastProcessor:
         safe_title = re.sub(r'[<>:"/\\|?*]', "", title)[:50]
         audio_path = temp_dir / f"{safe_title}.mp3"
 
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
         timeout = httpx.Timeout(10.0, read=300.0)  # 5 min read timeout for large files
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
             async with client.stream("GET", url) as response:
                 response.raise_for_status()
                 with open(audio_path, "wb") as f:
                     async for chunk in response.aiter_bytes(chunk_size=65536):
                         f.write(chunk)
 
+        logger.info(f"Downloaded audio: {audio_path.stat().st_size / (1024*1024):.1f}MB")
         return audio_path
 
     async def _transcribe(self, audio_path: Path) -> list[TranscriptSegment]:

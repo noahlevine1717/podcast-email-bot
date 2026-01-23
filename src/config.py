@@ -122,19 +122,19 @@ class Config(BaseModel):
 
             data = {
                 "telegram": {
-                    "bot_token": os.environ["TELEGRAM_BOT_TOKEN"],
+                    "bot_token": os.environ["TELEGRAM_BOT_TOKEN"].strip(),
                     "allowed_users": allowed_users,
                 },
                 "obsidian": {
                     "vault_path": os.environ.get("VAULT_PATH", "/data/vault"),
                 },
                 "ai": {
-                    "anthropic_api_key": os.environ["ANTHROPIC_API_KEY"],
+                    "anthropic_api_key": os.environ["ANTHROPIC_API_KEY"].strip(),
                     "model": os.environ.get("AI_MODEL", "claude-sonnet-4-20250514"),
                 },
                 "whisper": {
                     "mode": os.environ.get("WHISPER_MODE", "cloud"),
-                    "openai_api_key": os.environ.get("OPENAI_API_KEY", ""),
+                    "openai_api_key": os.environ.get("OPENAI_API_KEY", "").strip(),
                 },
                 "digest": {
                     "time": os.environ.get("DIGEST_TIME", "20:00"),
@@ -151,13 +151,13 @@ class Config(BaseModel):
                 "Either create config.yaml or set TELEGRAM_BOT_TOKEN environment variable."
             )
 
-        # Override secrets from environment variables if present
+        # Override secrets from environment variables if present (strip whitespace)
         if os.environ.get("TELEGRAM_BOT_TOKEN"):
-            data["telegram"]["bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
+            data["telegram"]["bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"].strip()
         if os.environ.get("ANTHROPIC_API_KEY"):
-            data["ai"]["anthropic_api_key"] = os.environ["ANTHROPIC_API_KEY"]
+            data["ai"]["anthropic_api_key"] = os.environ["ANTHROPIC_API_KEY"].strip()
         if os.environ.get("OPENAI_API_KEY"):
-            data.setdefault("whisper", {})["openai_api_key"] = os.environ["OPENAI_API_KEY"]
+            data.setdefault("whisper", {})["openai_api_key"] = os.environ["OPENAI_API_KEY"].strip()
 
         return cls.model_validate(data)
 
