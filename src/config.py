@@ -82,11 +82,22 @@ class EmailConfig(BaseModel):
 
 
 def _get_groq_key() -> str:
-    """Get Groq API key from multiple possible env var names."""
-    for var in ("GROQ_API_KEY", "TRANSCRIPTION_KEY", "OPENAI_API_KEY"):
+    """Get Groq API key from env vars or encoded in WHISPER_MODE."""
+    # Check dedicated env vars first
+    for var in ("GROQ_API_KEY", "TRANSCRIPTION_KEY"):
         val = os.environ.get(var, "").strip()
         if val.startswith("gsk_"):
             return val
+    # Check if WHISPER_MODE encodes the key as "groq:gsk_..."
+    whisper_mode = os.environ.get("WHISPER_MODE", "").strip()
+    if whisper_mode.startswith("groq:"):
+        key = whisper_mode[5:].strip()
+        if key.startswith("gsk_"):
+            return key
+    # Check if OPENAI_API_KEY is actually a Groq key
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if openai_key.startswith("gsk_"):
+        return openai_key
     return ""
 
 
@@ -143,7 +154,7 @@ class Config(BaseModel):
                     "model": os.environ.get("AI_MODEL", "claude-sonnet-4-20250514"),
                 },
                 "whisper": {
-                    "mode": os.environ.get("WHISPER_MODE", "cloud"),
+                    "mode": "cloud" if os.environ.get("WHISPER_MODE", "cloud").startswith("groq:") else os.environ.get("WHISPER_MODE", "cloud"),
                     "openai_api_key": os.environ.get("OPENAI_API_KEY", "").strip(),
                     "groq_api_key": _get_groq_key(),
                 },
