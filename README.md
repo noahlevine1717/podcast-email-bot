@@ -1,288 +1,181 @@
 # Podcast Knowledge Bot
 
-A Telegram bot that transforms podcast episodes into professional email-style summaries using Whisper transcription (local or cloud) and Claude AI.
+A Telegram bot that transforms podcast episodes into professional summaries using Whisper transcription and Claude AI.
 
-## What It Does
-
-1. **Send a podcast link** (Spotify, Apple Podcasts, or RSS feed URL)
-2. **Bot transcribes** the audio using Whisper (local or OpenAI cloud API)
-3. **Claude AI generates** a professional email-style summary with:
-   - Key discussion points
-   - Notable soundbites with timestamps
-   - Actionable takeaways
-4. **Review and refine** the summary with natural language feedback
-5. **Save, email, or edit** your summaries anytime
+Send a podcast link, get back a structured summary with key points, notable quotes, and actionable takeaways. Refine with natural language feedback, save, and email.
 
 ## Features
 
-- **Flexible transcription** - Choose local (free, private) or cloud (fast, ~$0.006/min)
-- **AI-powered summaries** - Professional, email-ready format via Claude
-- **Interactive editing** - Refine summaries with natural language feedback
-- **Persistent storage** - All summaries saved and searchable via Telegram
-- **Email integration** - Send summaries directly to your inbox
-- **Secure** - Restricted to authorized Telegram users only
+- **Cloud or local transcription** - Groq (free, fast), OpenAI, or local faster-whisper
+- **AI-powered summaries** - Professional format via Claude with key points, soundbites, takeaways
+- **Natural language refinement** - "Make it shorter", "Focus on the AI discussion"
+- **Learning system** - Improves summaries based on your feedback over time
+- **Email integration** - Send summaries to your inbox (Resend or SMTP)
+- **Access control** - Whitelist-based, only authorized Telegram users
 
-## Quick Start
+## Deployment Options
 
-### Prerequisites
+### Option A: Railway (Recommended for 24/7 access)
 
-- Python 3.11+
-- A Telegram account
-- An Anthropic API key ([get one here](https://console.anthropic.com))
-- FFmpeg installed (`brew install ffmpeg` on macOS)
-- **For cloud transcription:** OpenAI API key ([get one here](https://platform.openai.com/api-keys))
+1. Fork this repo on GitHub
 
-### Installation
+2. Create a new project on [Railway](https://railway.app) and connect your fork
 
-1. **Clone the repository**:
+3. Add these environment variables in Railway:
+
+   | Variable | Required | Description |
+   |----------|----------|-------------|
+   | `TELEGRAM_BOT_TOKEN` | Yes | From [@BotFather](https://t.me/botfather) |
+   | `TELEGRAM_ALLOWED_USERS` | Yes | Your Telegram user ID (from [@userinfobot](https://t.me/userinfobot)) |
+   | `ANTHROPIC_API_KEY` | Yes | From [console.anthropic.com](https://console.anthropic.com) |
+   | `GROQ_API_KEY` | Yes | From [console.groq.com](https://console.groq.com) (free tier) |
+   | `WHISPER_MODE` | No | `cloud` (default) or `local` |
+   | `VAULT_PATH` | No | `/data/vault` (default) |
+   | `RESEND_API_KEY` | No | For email features |
+   | `EMAIL_ENABLED` | No | `true` to enable email |
+
+4. Deploy - Railway auto-builds from the Dockerfile
+
+> **Note:** If you set `OPENAI_API_KEY` with a Groq key (starts with `gsk_`), it will be detected as Groq automatically. This is for backward compatibility.
+
+### Option B: Run Locally
+
+1. **Prerequisites**: Python 3.11+, FFmpeg (`brew install ffmpeg`)
+
+2. **Install**:
    ```bash
-   git clone <repository-url>
-   cd podcast-email-bot
-   ```
-
-2. **Create virtual environment and install**:
-   ```bash
+   git clone https://github.com/YOUR_USERNAME/knowledge-bot.git
+   cd knowledge-bot
    python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   source venv/bin/activate
    pip install -e .
    ```
 
-3. **Create your configuration**:
+3. **Configure**:
    ```bash
    cp config.yaml.example config.yaml
+   # Edit config.yaml with your API keys
    ```
 
-4. **Edit `config.yaml`** with your credentials (see Configuration section below)
-
-5. **Run the bot**:
+4. **Run**:
    ```bash
    python -m src.bot
    ```
 
-## Configuration
-
-Edit `config.yaml` with your settings:
-
-### Required Settings
-
-```yaml
-telegram:
-  bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
-  allowed_users: [YOUR_TELEGRAM_USER_ID]  # Security: restrict access
-
-ai:
-  anthropic_api_key: "YOUR_ANTHROPIC_API_KEY"
-```
-
-### Getting Your Credentials
-
-#### Telegram Bot Token
-1. Open Telegram and message [@BotFather](https://t.me/botfather)
-2. Send `/newbot` and follow the prompts
-3. Copy the token (looks like `123456789:ABCdefGHI...`)
-
-#### Your Telegram User ID
-1. Message [@userinfobot](https://t.me/userinfobot) on Telegram
-2. It will reply with your user ID (a number like `123456789`)
-3. Add this to `allowed_users` to restrict bot access to only you
-
-#### Anthropic API Key
-1. Sign up at [console.anthropic.com](https://console.anthropic.com)
-2. Go to API Keys and create a new key
-3. Copy the key (starts with `sk-ant-...`)
-
-### Optional Settings
-
-```yaml
-obsidian:
-  vault_path: "/path/to/data/directory"  # Where to store data files
-
-whisper:
-  mode: "local"       # "local" (free) or "cloud" (fast, uses OpenAI API)
-  openai_api_key: ""  # Required only if mode: "cloud"
-  model_size: "base"  # Local mode: tiny, base, small, medium, large-v3
-  device: "auto"      # Local mode: auto, cpu, cuda
-
-# Email via Resend (recommended - easiest setup)
-email:
-  enabled: true
-  provider: "resend"
-  resend_api_key: "re_xxxxx"  # Get from resend.com
-
-digest:
-  time: "20:00"
-  timezone: "America/Los_Angeles"
-```
-
-#### Email Setup (Resend - Recommended)
-1. Sign up free at [resend.com](https://resend.com)
-2. Go to API Keys and create a new key
-3. Add to config: `resend_api_key: "re_xxxxx"`
-4. Set `enabled: true`
-
-That's it! The default `from_email` works with Resend's free tier.
-
-#### Email Setup (Gmail - Alternative)
-If you prefer Gmail SMTP:
-```yaml
-email:
-  enabled: true
-  provider: "smtp"
-  smtp_server: "smtp.gmail.com"
-  smtp_port: 587
-  sender_email: "your-email@gmail.com"
-  sender_password: "your-app-password"
-```
-Note: Gmail requires an [App Password](https://myaccount.google.com/apppasswords) (not your regular password).
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `/start` | Welcome message and instructions |
-| `/podcast <url>` | Process a podcast episode |
-| `/lookup` | Browse and manage saved summaries |
-| `/help` | Show available commands |
-
-### Workflow Example
-
-1. **Send a podcast**:
-   ```
-   /podcast https://open.spotify.com/episode/...
+   To keep the bot running when you close the terminal:
+   ```bash
+   caffeinate -i python -m src.bot  # Prevents Mac sleep
    ```
 
-2. **Wait for transcription** (progress updates shown)
+## Getting Your Credentials
 
-3. **Review the draft summary** - You'll see a professional email-style summary
+| Credential | Where to get it |
+|------------|----------------|
+| Telegram Bot Token | Message [@BotFather](https://t.me/botfather), send `/newbot` |
+| Telegram User ID | Message [@userinfobot](https://t.me/userinfobot) |
+| Anthropic API Key | [console.anthropic.com](https://console.anthropic.com) → API Keys |
+| Groq API Key | [console.groq.com](https://console.groq.com) → API Keys (free) |
 
-4. **Choose an action**:
-   - **Approve & Save** - Save as-is
-   - **Give Feedback** - Refine with natural language (e.g., "Make it shorter" or "Add more detail about the AI discussion")
+## Transcription Options
 
-5. **After saving**, you can:
-   - **Edit Later** - Refine the saved summary
-   - **Send as Email** - Email it to yourself
-   - **Done** - Finish
-
-6. **Use `/lookup`** anytime to:
-   - View saved summaries
-   - Edit with AI feedback
-   - Send via email
-   - Delete from history
-
-## Supported Podcast Sources
-
-- **Spotify** - Episode or show links
-- **Apple Podcasts** - Episode links
-- **RSS Feeds** - Direct feed URLs
-- **Direct audio URLs** - MP3/M4A links
-
-## Transcription Modes
-
-### Cloud Mode (Recommended for most users)
-Uses OpenAI's Whisper API - fast and works on any machine.
+### Groq (Recommended)
+Free tier, very fast transcription. 25MB file size limit (bot auto-compresses audio to fit).
 
 ```yaml
 whisper:
   mode: "cloud"
-  openai_api_key: "sk-proj-..."  # Get from platform.openai.com/api-keys
+  groq_api_key: "gsk_..."
 ```
 
-**Pros:** Fast (~30 seconds for 1-hour podcast), no hardware requirements
-**Cons:** Costs ~$0.006/minute (~$0.36 for 1-hour podcast)
+### OpenAI Whisper API
+Paid (~$0.006/min), no file size issues.
 
-### Local Mode (Free, privacy-focused)
-Runs Whisper on your machine - free but requires decent hardware.
+```yaml
+whisper:
+  mode: "cloud"
+  openai_api_key: "sk-proj-..."
+```
+
+### Local (faster-whisper)
+Free, private, requires decent CPU/GPU. Not available on Railway.
 
 ```yaml
 whisper:
   mode: "local"
   model_size: "base"  # tiny, base, small, medium, large-v3
-  device: "auto"      # auto, cpu, cuda
 ```
 
-**Local model requirements:**
+## Commands
 
-| Model | VRAM/RAM | Speed | Accuracy |
-|-------|----------|-------|----------|
-| `tiny` | ~1GB | Fastest | Basic |
-| `base` | ~1GB | Fast | Good |
-| `small` | ~2GB | Medium | Better |
-| `medium` | ~5GB | Slow | Great |
-| `large-v3` | ~10GB | Slowest | Best |
+| Command | Description |
+|---------|-------------|
+| `/podcast <url>` | Process a podcast episode |
+| `/lookup` | Browse and manage saved summaries |
+| `/status` | Check processing queue |
+| `/stop` | Cancel stuck processes |
+| `/stats` | View learning statistics |
+| `/help` | Show available commands |
+| `/poweron` / `/poweroff` | Start/stop bot (supervisor mode) |
 
-**Pros:** Free, audio stays on your machine
-**Cons:** Slower (real-time or longer), requires good CPU/GPU
+### Supported Sources
+- Spotify episode/show links
+- Apple Podcasts links
+- RSS feed URLs
+- Direct audio URLs (MP3, M4A)
 
 ## Troubleshooting
 
-### "Podcast transcription is slow"
-- **Switch to cloud mode** - Set `mode: "cloud"` for fastest results
-- Use a smaller Whisper model in local mode (`tiny` or `base`)
-- If you have an NVIDIA GPU, set `device: "cuda"`
-- Long podcasts (2+ hours) take proportionally longer in local mode
+### "Bot doesn't respond"
+- Verify your Telegram user ID is in `allowed_users` (or `TELEGRAM_ALLOWED_USERS` env var)
+- Check the bot token is correct
+- On Railway: check deployment logs for errors
+
+### "Groq transcription failed"
+- **File too large**: The bot auto-compresses, but very long podcasts (3+ hours) may exceed Groq's 25MB limit. Try OpenAI instead.
+- **Rate limited (429)**: Groq free tier has rate limits. Wait a minute and retry.
+- **Trailing whitespace in key**: The bot auto-strips whitespace, but double-check your env var has no extra characters.
 
 ### "Can't find audio for Spotify podcast"
 - Some Spotify podcasts are DRM-protected
-- Try using the podcast's RSS feed URL instead
-- Search for the podcast on podcasts.apple.com and use that link
+- Try the podcast's RSS feed URL instead (search on podcasts.apple.com)
+- If the wrong episode is matched, try a more specific Spotify episode link (not show link)
 
-### "Bot doesn't respond"
-- Check that your Telegram user ID is in `allowed_users`
-- Verify the bot token is correct
-- Check the terminal for error messages
+### "Telegram parse error in error messages"
+- This is a known edge case with special characters in error text. The bot sanitizes output but some edge cases slip through. File an issue if you see this.
 
-### "Email sending failed"
-- For Gmail, you must use an App Password (not your regular password)
-- Check that 2FA is enabled on your Google account
-- Verify SMTP settings match your email provider
-
-### "Out of memory during transcription"
-- Use a smaller Whisper model
-- Close other applications
-- For very long podcasts, consider splitting the audio
+### "Bot is stuck / not responding to commands"
+- Use `/stop` to clear all stuck sessions
+- The ConversationHandler has a 10-minute timeout to auto-recover from stuck states
 
 ## Project Structure
 
 ```
-podcast-knowledge-bot/
+knowledge-bot/
 ├── src/
-│   ├── bot.py              # Main Telegram bot
+│   ├── bot.py                # Main Telegram bot
+│   ├── config.py             # Configuration (Pydantic models)
 │   ├── processors/
-│   │   └── podcast.py      # Podcast download & metadata
+│   │   └── podcast.py        # Audio download & transcription
 │   ├── ai/
-│   │   └── summarizer.py   # Claude AI integration
+│   │   ├── summarizer.py     # Claude AI summaries
+│   │   └── learning.py       # Preference learning
 │   └── storage/
-│       └── summaries.py    # JSON-based storage
-├── config.yaml.example     # Template configuration
-├── pyproject.toml          # Dependencies
+│       └── summaries.py      # JSON-based persistence
+├── Dockerfile                # Cloud deployment (Railway)
+├── railway.toml              # Railway config
+├── requirements-cloud.txt    # Cloud-only dependencies (no PyTorch)
+├── config.yaml.example       # Configuration template
 └── README.md
 ```
 
-## Security Notes
+## Security
 
-- **Never commit `config.yaml`** - It contains your API keys
-- **Use `allowed_users`** - Restrict bot access to your Telegram ID
-- **App Passwords** - Never use your main email password
-- The `.gitignore` excludes sensitive files by default
-
-## Development
-
-```bash
-# Install with dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Run the bot in development
-python -m src.bot
-```
+- **Access control**: Only whitelisted Telegram user IDs can use the bot
+- **Secrets**: All API keys in `config.yaml` (gitignored) or environment variables
+- **SSRF protection**: URL validation before fetching audio
+- **Error sanitization**: No internal paths/stack traces in user-facing messages
+- Never commit `config.yaml` or `.env` files
 
 ## License
 
-MIT License - feel free to use and modify.
-
----
-
-Built with [python-telegram-bot](https://python-telegram-bot.org/), [OpenAI Whisper](https://github.com/openai/whisper), and [Claude AI](https://anthropic.com).
+MIT

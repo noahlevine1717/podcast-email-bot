@@ -1755,13 +1755,10 @@ def main():
     init_config(config_path)
     config = get_config()
 
-    # Log environment for debugging
-    import os as _os
-    commit_sha = _os.environ.get("RAILWAY_GIT_COMMIT_SHA", "unknown")[:7]
-    openai_prefix = _os.environ.get("OPENAI_API_KEY", "")[:6]
-    logger.info(f"Running commit: {commit_sha}, OPENAI_API_KEY prefix: '{openai_prefix}'")
+    # Startup info
     groq_configured = bool(config.whisper.groq_api_key)
-    logger.info(f"Whisper mode: {config.whisper.mode}, Groq configured: {groq_configured}")
+    user_count = len(config.telegram.allowed_users)
+    logger.info(f"Whisper mode: {config.whisper.mode}, Groq configured: {groq_configured}, allowed users: {user_count}")
 
     # Create bot instance
     bot = KnowledgeBot()

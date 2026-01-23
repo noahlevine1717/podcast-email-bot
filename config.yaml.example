@@ -22,13 +22,17 @@ ai:
   model: "claude-sonnet-4-20250514"
 
 whisper:
-  # Transcription mode: "local" (faster-whisper) or "cloud" (OpenAI Whisper API)
+  # Transcription mode: "local" (faster-whisper) or "cloud" (API-based)
   # - local: Free, runs on your machine, requires good CPU/GPU
-  # - cloud: Fast, works even on slow machines, costs ~$0.006/min
-  mode: "local"
+  # - cloud: Fast, works anywhere; uses Groq (recommended) or OpenAI
+  mode: "cloud"
 
-  # OpenAI API key (required if mode: "cloud")
-  # Get from platform.openai.com/api-keys
+  # Option 1: Groq (Recommended - free tier, very fast)
+  # Sign up at https://console.groq.com and create an API key
+  groq_api_key: ""
+
+  # Option 2: OpenAI Whisper API (paid, ~$0.006/min)
+  # Get from https://platform.openai.com/api-keys
   openai_api_key: ""
 
   # Local mode settings (only used if mode: "local")

@@ -1,5 +1,7 @@
 # Configuration with secrets
 config.yaml
+.env
+.env.*
 
 # Python
 __pycache__/
@@ -55,6 +57,15 @@ htmlcov/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Audio files (downloaded during processing)
+*.mp3
+*.m4a
+*.wav
+*.ogg
+
+# Data directory (user content)
+data/
 
 # Temp files
 *.tmp
