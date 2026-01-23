@@ -82,14 +82,11 @@ class EmailConfig(BaseModel):
 
 
 def _get_groq_key() -> str:
-    """Get Groq API key from GROQ_API_KEY or detect if OPENAI_API_KEY is actually a Groq key."""
-    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
-    if groq_key:
-        return groq_key
-    # Fallback: if OPENAI_API_KEY starts with gsk_, it's actually a Groq key
-    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if openai_key.startswith("gsk_"):
-        return openai_key
+    """Get Groq API key from multiple possible env var names."""
+    for var in ("GROQ_API_KEY", "TRANSCRIPTION_KEY", "OPENAI_API_KEY"):
+        val = os.environ.get(var, "").strip()
+        if val.startswith("gsk_"):
+            return val
     return ""
 
 
