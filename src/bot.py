@@ -317,11 +317,13 @@ class KnowledgeBot:
             logger.exception("Error during transcription")
             session["transcription_error"] = str(e)
             session["transcription_complete"] = True
-            await app.bot.send_message(
-                chat_id=chat_id,
-                text=f"❌ **Transcription failed:** {sanitize_error_message(e)}\n\nPlease try again with /podcast",
-                parse_mode="Markdown",
-            )
+            try:
+                await app.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Transcription failed: {sanitize_error_message(e)}\n\nPlease try again with /podcast",
+                )
+            except Exception:
+                pass
 
     def _split_long_message(self, text: str, max_length: int = 4000) -> list[str]:
         """Split a message into chunks at paragraph boundaries."""
