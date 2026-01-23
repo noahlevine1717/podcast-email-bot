@@ -1757,8 +1757,8 @@ def main():
 
     # Log environment for debugging
     import os as _os
-    all_keys = sorted(_os.environ.keys())
-    logger.info(f"All env vars: {all_keys}")
+    commit_sha = _os.environ.get("RAILWAY_GIT_COMMIT_SHA", "unknown")[:7]
+    logger.info(f"Running commit: {commit_sha}")
     groq_configured = bool(config.whisper.groq_api_key)
     logger.info(f"Whisper mode: {config.whisper.mode}, Groq configured: {groq_configured}")
 
