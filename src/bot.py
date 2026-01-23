@@ -1758,14 +1758,12 @@ def main():
     # Startup info
     import os as _os
     groq_configured = bool(config.whisper.groq_api_key)
-    raw_whisper_key = _os.environ.get("OPENAI_WHISPER_KEY", "")
-    logger.info(f"OPENAI_WHISPER_KEY raw: len={len(raw_whisper_key)}, prefix='{raw_whisper_key[:8]}'")
-    fallback_key = raw_whisper_key.strip()
+    fallback_key = _os.environ.get("OPENAI_WHISPER_KEY", "").strip()
     if not fallback_key or fallback_key.startswith("gsk_"):
         fallback_key = config.whisper.openai_api_key if (config.whisper.openai_api_key and not config.whisper.openai_api_key.startswith("gsk_")) else ""
-    openai_configured = bool(fallback_key)
+    openai_fallback = bool(fallback_key)
     user_count = len(config.telegram.allowed_users)
-    logger.info(f"Whisper mode: {config.whisper.mode}, Groq configured: {groq_configured}, OpenAI fallback: {openai_configured}, allowed users: {user_count}")
+    logger.info(f"Whisper mode: {config.whisper.mode}, Groq: {groq_configured}, OpenAI fallback: {openai_fallback}, users: {user_count}")
 
     # Create bot instance
     bot = KnowledgeBot()

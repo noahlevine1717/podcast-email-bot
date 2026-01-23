@@ -70,6 +70,7 @@ A Telegram bot that transforms podcast episodes into structured, email-ready sum
 | `TELEGRAM_ALLOWED_USERS` | Yes | Comma-separated Telegram user IDs |
 | `ANTHROPIC_API_KEY` | Yes | Claude API key |
 | `GROQ_API_KEY` | Yes | Groq API key (or use `OPENAI_API_KEY` with gsk_ prefix) |
+| `OPENAI_WHISPER_KEY` | No | Real OpenAI key for automatic fallback on Groq 429/413 |
 | `WHISPER_MODE` | No | `cloud` (default) or `local` |
 | `VAULT_PATH` | No | Data storage path (default: `/data/vault`) |
 | `AI_MODEL` | No | Claude model (default: `claude-sonnet-4-20250514`) |
@@ -121,8 +122,8 @@ This means on Railway you can set either `GROQ_API_KEY=gsk_...` or `OPENAI_API_K
 **Solution**: All env var reads in `config.py` call `.strip()` on the value.
 
 ### 429 Rate Limit on Groq Free Tier
-**Problem**: Groq's free tier has request-per-minute limits. Back-to-back podcast processing can hit this.
-**Mitigation**: The bot surfaces the error to the user. No automatic retry yet.
+**Problem**: Groq's free tier has per-hour audio limits (~2 hours/hour). Back-to-back podcast processing can hit this.
+**Solution**: If `OPENAI_WHISPER_KEY` is set, the bot automatically falls back to OpenAI and notifies the user. Without it, the error surfaces and user must wait ~20 min.
 
 ### Telegram Markdown Parse Errors
 **Problem**: Special characters in error messages or summaries can cause `telegram.error.BadRequest` when using MarkdownV2 parse mode.

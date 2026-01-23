@@ -274,7 +274,7 @@ class PodcastProcessor:
                 f"Duration: {duration_str}\n"
                 f"_This may take a few minutes._"
             )
-            segments = await self._transcribe(audio_path)
+            segments = await self._transcribe(audio_path, status_callback=report_status)
             full_transcript = self._segments_to_text(segments)
 
             # Clean up audio file
@@ -732,13 +732,13 @@ class PodcastProcessor:
         logger.info(f"Downloaded audio: {audio_path.stat().st_size / (1024*1024):.1f}MB")
         return audio_path
 
-    async def _transcribe(self, audio_path: Path) -> list[TranscriptSegment]:
+    async def _transcribe(self, audio_path: Path, status_callback=None) -> list[TranscriptSegment]:
         """Transcribe audio file using Whisper (local or cloud)."""
         logger.info(f"Transcribing: {audio_path}")
 
         # Check if we should use cloud transcription
         if self.config.whisper.mode == "cloud":
-            return await self._transcribe_cloud(audio_path)
+            return await self._transcribe_cloud(audio_path, status_callback=status_callback)
         else:
             return await self._transcribe_local(audio_path)
 
@@ -805,7 +805,7 @@ class PodcastProcessor:
         """Check if a real OpenAI key is available for fallback."""
         return bool(self._get_openai_fallback_key())
 
-    async def _transcribe_cloud(self, audio_path: Path) -> list[TranscriptSegment]:
+    async def _transcribe_cloud(self, audio_path: Path, status_callback=None) -> list[TranscriptSegment]:
         """Transcribe using Groq or OpenAI Whisper API (fast, cloud-based).
 
         If Groq fails with 429 (rate limit) or 413 (file too large), automatically
@@ -828,11 +828,15 @@ class PodcastProcessor:
                     provider="Groq",
                 )
             except (openai.RateLimitError, openai.APIStatusError) as e:
-                status = getattr(e, 'status_code', None)
-                if status == 429 and self._has_openai_fallback():
+                status_code = getattr(e, 'status_code', None)
+                if status_code == 429 and self._has_openai_fallback():
                     logger.warning(f"Groq rate limited, falling back to OpenAI: {e}")
-                elif status == 413 and self._has_openai_fallback():
+                    if status_callback:
+                        await status_callback("⚡ Groq rate limit hit — switching to OpenAI for this transcription...")
+                elif status_code == 413 and self._has_openai_fallback():
                     logger.warning(f"Groq file too large, falling back to OpenAI: {e}")
+                    if status_callback:
+                        await status_callback("⚡ Audio too large for Groq — switching to OpenAI for this transcription...")
                 else:
                     raise
 

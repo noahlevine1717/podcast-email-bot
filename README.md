@@ -29,6 +29,7 @@ Send a podcast link, get back a structured summary with key points, notable quot
    | `TELEGRAM_ALLOWED_USERS` | Yes | Your Telegram user ID (from [@userinfobot](https://t.me/userinfobot)) |
    | `ANTHROPIC_API_KEY` | Yes | From [console.anthropic.com](https://console.anthropic.com) |
    | `GROQ_API_KEY` | Yes | From [console.groq.com](https://console.groq.com) (free tier) |
+   | `OPENAI_WHISPER_KEY` | No | OpenAI key — auto-fallback when Groq is rate-limited ([get one](https://platform.openai.com/api-keys)) |
    | `WHISPER_MODE` | No | `cloud` (default) or `local` |
    | `VAULT_PATH` | No | `/data/vault` (default) |
    | `RESEND_API_KEY` | No | For email features |
@@ -85,6 +86,7 @@ Send a podcast link, get back a structured summary with key points, notable quot
 
 ### Groq (Recommended)
 Free tier, very fast transcription. 25MB file size limit (bot auto-compresses audio to fit).
+If you also set `OPENAI_WHISPER_KEY`, the bot automatically falls back to OpenAI when Groq hits rate limits (429) or file size limits (413).
 
 ```yaml
 whisper:
@@ -93,7 +95,7 @@ whisper:
 ```
 
 ### OpenAI Whisper API
-Paid (~$0.006/min), no file size issues.
+Paid (~$0.006/min), no file size issues. Used as primary if no Groq key, or as automatic fallback.
 
 ```yaml
 whisper:
@@ -136,8 +138,7 @@ whisper:
 - On Railway: check deployment logs for errors
 
 ### "Groq transcription failed"
-- **File too large**: The bot auto-compresses, but very long podcasts (3+ hours) may exceed Groq's 25MB limit. Try OpenAI instead.
-- **Rate limited (429)**: Groq free tier has rate limits. Wait a minute and retry.
+- **File too large / Rate limited**: If you set `OPENAI_WHISPER_KEY`, the bot automatically falls back to OpenAI. Otherwise, wait for the rate limit to reset (~20 min) or try a shorter podcast.
 - **Trailing whitespace in key**: The bot auto-strips whitespace, but double-check your env var has no extra characters.
 
 ### "Can't find audio for Spotify podcast"
