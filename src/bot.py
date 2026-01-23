@@ -1755,6 +1755,10 @@ def main():
     init_config(config_path)
     config = get_config()
 
+    # Log whisper configuration for debugging
+    groq_configured = bool(config.whisper.groq_api_key)
+    logger.info(f"Whisper mode: {config.whisper.mode}, Groq configured: {groq_configured}")
+
     # Create bot instance
     bot = KnowledgeBot()
 
