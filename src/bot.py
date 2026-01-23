@@ -1756,6 +1756,10 @@ def main():
     config = get_config()
 
     # Log whisper configuration for debugging
+    import os as _os
+    groq_env = _os.environ.get("GROQ_API_KEY", "")
+    groq_keys = [k for k in _os.environ if "GROQ" in k.upper()]
+    logger.info(f"GROQ_API_KEY env present: {bool(groq_env)}, len: {len(groq_env)}, all GROQ vars: {groq_keys}")
     groq_configured = bool(config.whisper.groq_api_key)
     logger.info(f"Whisper mode: {config.whisper.mode}, Groq configured: {groq_configured}")
 
