@@ -1758,7 +1758,8 @@ def main():
     # Log environment for debugging
     import os as _os
     commit_sha = _os.environ.get("RAILWAY_GIT_COMMIT_SHA", "unknown")[:7]
-    logger.info(f"Running commit: {commit_sha}")
+    openai_prefix = _os.environ.get("OPENAI_API_KEY", "")[:6]
+    logger.info(f"Running commit: {commit_sha}, OPENAI_API_KEY prefix: '{openai_prefix}'")
     groq_configured = bool(config.whisper.groq_api_key)
     logger.info(f"Whisper mode: {config.whisper.mode}, Groq configured: {groq_configured}")
 
