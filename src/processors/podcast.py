@@ -437,10 +437,10 @@ class PodcastProcessor:
         return None
 
     async def _download_from_spotify(self, url: str) -> tuple[Path, PodcastMetadata]:
-        """Download from Spotify by finding the RSS feed."""
+        """Download from Spotify by finding the RSS feed or using yt-dlp."""
         logger.info(f"Processing Spotify URL: {url}")
 
-        # Extract show ID from Spotify URL
+        # Extract show ID and episode ID from Spotify URL
         # URLs look like: https://open.spotify.com/show/XXXXX or /episode/XXXXX
         parsed = urlparse(url)
         path_parts = parsed.path.strip("/").split("/")
@@ -454,42 +454,45 @@ class PodcastProcessor:
             elif part == "episode" and i + 1 < len(path_parts):
                 episode_id = path_parts[i + 1].split("?")[0]
 
-        # Get episode title for matching if we have an episode ID
+        # For specific episode URLs, try yt-dlp FIRST
+        # This handles video podcasts and Spotify-exclusive content better
+        if episode_id:
+            logger.info(f"Spotify episode URL detected, trying yt-dlp first for exact episode")
+            try:
+                result = await self._download_with_ytdlp(url)
+                logger.info("Successfully downloaded via yt-dlp")
+                return result
+            except Exception as e:
+                logger.info(f"yt-dlp failed ({e}), falling back to RSS method")
+                # Continue to RSS fallback
+
+        # Get episode title for RSS matching if we have an episode ID
         episode_title = None
         if episode_id:
             episode_title = await self._get_episode_title_from_spotify(episode_id)
 
-        # Try to find RSS feed using spotifeed service
+        # Try to find RSS feed
+        if not show_id and episode_id:
+            show_id = await self._get_show_id_from_episode(episode_id)
+
         if show_id:
             rss_url = await self._find_rss_from_spotify(show_id)
             if rss_url:
                 logger.info(f"Found RSS feed: {rss_url}")
-                return await self._download_from_rss(rss_url, episode_title=episode_title)
+                try:
+                    result = await self._download_from_rss(rss_url, episode_title=episode_title)
+                    # Verify we got the right episode if we had a target title
+                    if episode_title and result[1].title:
+                        if not self._titles_match(episode_title, result[1].title):
+                            logger.warning(f"RSS episode title '{result[1].title}' doesn't match Spotify title '{episode_title}'")
+                            # Try yt-dlp as it might get the exact episode
+                            raise ValueError("Episode title mismatch")
+                    return result
+                except Exception as e:
+                    logger.warning(f"RSS download failed or mismatched: {e}")
+                    # Fall through to yt-dlp retry
 
-        # If we have an episode ID but no show ID, try to get show info from episode page
-        if episode_id and not show_id:
-            logger.info(f"Episode URL detected, fetching show ID from episode: {episode_id}")
-            show_id = await self._get_show_id_from_episode(episode_id)
-            if show_id:
-                rss_url = await self._find_rss_from_spotify(show_id)
-                if rss_url:
-                    logger.info(f"Found RSS feed from episode: {rss_url}")
-                    return await self._download_from_rss(rss_url, episode_title=episode_title)
-
-            # If we still can't find the show, try yt-dlp as last resort
-            try:
-                return await self._download_with_ytdlp(url)
-            except Exception as e:
-                if "DRM" in str(e):
-                    raise ValueError(
-                        "This podcast is DRM-protected on Spotify. "
-                        "Try finding the podcast's RSS feed directly - most podcasts "
-                        "publish their RSS feed on their website or you can search "
-                        "'[podcast name] RSS feed' to find it."
-                    )
-                raise
-
-        # Fallback to yt-dlp (may fail with DRM error)
+        # Final fallback to yt-dlp
         try:
             return await self._download_with_ytdlp(url)
         except Exception as e:
@@ -503,6 +506,26 @@ class PodcastProcessor:
                     "Then use: /podcast <rss-feed-url>"
                 )
             raise
+
+    def _titles_match(self, title1: str, title2: str) -> bool:
+        """Check if two episode titles are similar enough to be the same episode."""
+        t1 = title1.lower().strip()
+        t2 = title2.lower().strip()
+        # Exact match
+        if t1 == t2:
+            return True
+        # One contains the other
+        if t1 in t2 or t2 in t1:
+            return True
+        # Word overlap (at least 50% of words match)
+        words1 = set(t1.split())
+        words2 = set(t2.split())
+        if words1 and words2:
+            overlap = len(words1 & words2)
+            min_words = min(len(words1), len(words2))
+            if overlap >= min_words * 0.5:
+                return True
+        return False
 
     async def _get_show_id_from_episode(self, episode_id: str) -> str | None:
         """Get the show ID from a Spotify episode by fetching the episode page."""
