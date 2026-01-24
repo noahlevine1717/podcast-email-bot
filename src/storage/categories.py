@@ -322,6 +322,56 @@ class CategoryStorage:
             result.extend(self.get_children(root.id))
         return result
 
+    def export_to_markdown(self, vault_path: Path | str) -> str:
+        """Export categories to a markdown file for backup.
+
+        Returns the path to the exported file.
+        """
+        vault_path = Path(vault_path)
+        export_path = vault_path / "content" / "podcasts" / "_library_index.md"
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+
+        lines = [
+            "---",
+            "title: Podcast Library Index",
+            "type: index",
+            f"updated: {datetime.now().isoformat()}",
+            "---",
+            "",
+            "# Podcast Library Index",
+            "",
+            "This file is auto-generated as a backup of your folder structure.",
+            "",
+            "## Folder Structure",
+            "",
+        ]
+
+        tree = self.list_tree()
+        for root in tree:
+            lines.append(f"### {root['emoji']} {root['name']}")
+            if root.get('description'):
+                lines.append(f"_{root['description']}_")
+            lines.append(f"- ID: `{root['id']}`")
+            lines.append(f"- Podcasts: {root['count']}")
+            lines.append("")
+
+            for child in root.get("children", []):
+                lines.append(f"#### {child['emoji']} {child['name']}")
+                if child.get('description'):
+                    lines.append(f"_{child['description']}_")
+                lines.append(f"- ID: `{child['id']}`")
+                lines.append(f"- Podcasts: {child['count']}")
+                lines.append("")
+
+        lines.append("## All Categories (JSON backup)")
+        lines.append("")
+        lines.append("```json")
+        lines.append(json.dumps([asdict(c) for c in self._categories.values()], indent=2))
+        lines.append("```")
+
+        export_path.write_text("\n".join(lines))
+        return str(export_path)
+
     def apply_reorganization(self, operations: list[dict]) -> list[str]:
         """Apply a batch of reorganization operations from AI.
 

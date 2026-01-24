@@ -642,7 +642,7 @@ class KnowledgeBot:
             await query.edit_message_text("💾 Saving...")
 
             try:
-                # Save to summary storage (not Obsidian)
+                # Save to summary storage (JSON)
                 summary_id = self.summary_storage.save_summary(
                     title=session['metadata'].title,
                     email_content=session['draft_email'],
@@ -651,6 +651,17 @@ class KnowledgeBot:
                     url=session['metadata'].url,
                     duration=session.get('duration_str'),
                 )
+
+                # Also save to Obsidian vault as markdown backup
+                try:
+                    self.vault.save_podcast_email(
+                        metadata=session['metadata'],
+                        email_content=session['draft_email'],
+                        transcript=session['transcript'],
+                    )
+                    logger.info(f"Saved markdown backup to vault: {session['metadata'].title}")
+                except Exception as vault_err:
+                    logger.warning(f"Failed to save vault backup (non-critical): {vault_err}")
 
                 # Store the saved ID for potential editing
                 if not hasattr(self, '_saved_summaries'):
@@ -846,6 +857,12 @@ class KnowledgeBot:
                 reorg_msg = await self._trigger_reorganization()
                 if reorg_msg:
                     folder_msg += f"\n\n{reorg_msg}"
+
+            # Export categories to vault as backup
+            try:
+                self.category_storage.export_to_markdown(self.config.obsidian.vault_path)
+            except Exception as e:
+                logger.warning(f"Failed to export categories backup: {e}")
 
             return folder_msg
 

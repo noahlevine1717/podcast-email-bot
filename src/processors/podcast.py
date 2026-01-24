@@ -454,56 +454,75 @@ class PodcastProcessor:
             elif part == "episode" and i + 1 < len(path_parts):
                 episode_id = path_parts[i + 1].split("?")[0]
 
-        # For specific episode URLs, try yt-dlp FIRST
-        # This handles video podcasts and Spotify-exclusive content better
-        if episode_id:
-            logger.info(f"Spotify episode URL detected, trying yt-dlp first for exact episode")
-            try:
-                result = await self._download_with_ytdlp(url)
-                logger.info("Successfully downloaded via yt-dlp")
-                return result
-            except Exception as e:
-                logger.info(f"yt-dlp failed ({e}), falling back to RSS method")
-                # Continue to RSS fallback
-
         # Get episode title for RSS matching if we have an episode ID
         episode_title = None
         if episode_id:
             episode_title = await self._get_episode_title_from_spotify(episode_id)
+            logger.info(f"Target episode title from Spotify: {episode_title}")
 
-        # Try to find RSS feed
+        # Try to find RSS feed first
         if not show_id and episode_id:
             show_id = await self._get_show_id_from_episode(episode_id)
+
+        rss_result = None
+        rss_matched = False
 
         if show_id:
             rss_url = await self._find_rss_from_spotify(show_id)
             if rss_url:
                 logger.info(f"Found RSS feed: {rss_url}")
                 try:
-                    result = await self._download_from_rss(rss_url, episode_title=episode_title)
-                    # Verify we got the right episode if we had a target title
-                    if episode_title and result[1].title:
-                        if not self._titles_match(episode_title, result[1].title):
-                            logger.warning(f"RSS episode title '{result[1].title}' doesn't match Spotify title '{episode_title}'")
-                            # Try yt-dlp as it might get the exact episode
-                            raise ValueError("Episode title mismatch")
-                    return result
+                    rss_result = await self._download_from_rss(rss_url, episode_title=episode_title)
+                    # Check if we got the right episode
+                    if episode_title and rss_result[1].title:
+                        rss_matched = self._titles_match(episode_title, rss_result[1].title)
+                        if rss_matched:
+                            logger.info(f"RSS episode matched: {rss_result[1].title}")
+                            return rss_result
+                        else:
+                            logger.warning(f"RSS returned different episode: '{rss_result[1].title}' vs expected '{episode_title}'")
+                    else:
+                        # No episode title to match, assume RSS is correct
+                        return rss_result
                 except Exception as e:
-                    logger.warning(f"RSS download failed or mismatched: {e}")
-                    # Fall through to yt-dlp retry
+                    logger.warning(f"RSS download failed: {e}")
 
-        # Final fallback to yt-dlp
+        # If RSS didn't match the episode, try yt-dlp for exact episode
+        if episode_id and not rss_matched:
+            logger.info("Trying yt-dlp for exact episode match")
+            try:
+                result = await self._download_with_ytdlp(url)
+                logger.info("Successfully downloaded via yt-dlp")
+                return result
+            except Exception as e:
+                logger.warning(f"yt-dlp failed: {e}")
+                # If we have an RSS result (even if wrong episode), use it as last resort
+                if rss_result:
+                    logger.warning("Using RSS result (may be wrong episode) as yt-dlp also failed")
+                    return rss_result
+                # Both failed
+                if "DRM" in str(e):
+                    raise ValueError(
+                        "This podcast is DRM-protected on Spotify and the RSS feed "
+                        "doesn't have this specific episode. Try one of these:\n"
+                        "1. Find the podcast's RSS feed URL on their website\n"
+                        "2. Search '[podcast name] RSS feed' online\n"
+                        "3. Try a different episode from this show\n\n"
+                        "Then use: /podcast <rss-feed-url>"
+                    )
+                raise
+
+        # No episode ID (show URL) - just get latest from RSS or try yt-dlp
+        if rss_result:
+            return rss_result
+
         try:
             return await self._download_with_ytdlp(url)
         except Exception as e:
             if "DRM" in str(e):
                 raise ValueError(
                     "This podcast is DRM-protected on Spotify. "
-                    "Try one of these alternatives:\n"
-                    "1. Find the podcast's RSS feed URL on their website\n"
-                    "2. Search '[podcast name] RSS feed' online\n"
-                    "3. Check if the podcast is on Apple Podcasts (often has RSS)\n\n"
-                    "Then use: /podcast <rss-feed-url>"
+                    "Try finding the podcast's RSS feed URL."
                 )
             raise
 
