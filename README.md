@@ -9,6 +9,8 @@ Send a podcast link, get back a structured summary with key points, notable quot
 - **Cloud or local transcription** - Groq (free, fast), OpenAI, or local faster-whisper
 - **AI-powered summaries** - Professional format via Claude with key points, soundbites, takeaways
 - **Natural language refinement** - "Make it shorter", "Focus on the AI discussion"
+- **Smart folder organization** - AI auto-categorizes podcasts into a hierarchical folder system that evolves over time
+- **Natural language search** - Find past podcasts by topic, question, or keyword
 - **Learning system** - Improves summaries based on your feedback over time
 - **Email integration** - Send summaries to your inbox (Resend or SMTP)
 - **Access control** - Whitelist-based, only authorized Telegram users
@@ -132,7 +134,8 @@ whisper:
 | Command | Description |
 |---------|-------------|
 | `/podcast <url>` | Process a podcast episode |
-| `/lookup` | Browse and manage saved summaries |
+| `/lookup` | Browse folders, search, and manage saved summaries |
+| `/organize` | AI-powered folder reorganization (or batch-categorize existing) |
 | `/status` | Check processing queue |
 | `/stop` | Cancel stuck processes |
 | `/stats` | View learning statistics |
@@ -144,6 +147,58 @@ whisper:
 - Apple Podcasts links
 - RSS feed URLs
 - Direct audio URLs (MP3, M4A)
+
+## Smart Folder System
+
+Podcasts are automatically organized into a hierarchical folder structure powered by Claude AI.
+
+### How It Works
+
+1. **Save a podcast** → Claude analyzes the content and files it into the best folder
+2. **Folders grow organically** → New folders are created when existing ones don't fit
+3. **Auto-reorganization** → Every 5 saves, Claude reviews and cleans up the structure (merging duplicates, splitting overgrown folders)
+4. **User control** → Create, rename, move, and delete folders via buttons in `/lookup`
+
+### Browsing (`/lookup`)
+
+The `/lookup` command shows your full library:
+
+```
+📚 Your Podcast Library
+
+🤖 AI & Machine Learning (6)
+💼 Business & Strategy (4)
+🧠 Science & Health (2)
+
+📋 Recent:
+  1. Episode Title — Show Name (Jan 20)
+  2. Episode Title — Show Name (Jan 18)
+
+Reply with:
+• A number to view a recent summary
+• A folder name to browse that folder
+• A question to search your library
+```
+
+- **Type a number** → View that summary
+- **Type a folder name** → Browse folder contents (paginated, with sub-folders)
+- **Type a question** → Smart search (substring match first, then AI semantic search)
+
+### Folder Management
+
+Inside any folder view, you get buttons for:
+- **New Sub-folder** — Create a child folder
+- **Rename** — Change folder name/emoji
+- **Move** — Re-parent under a different folder
+- **Delete** — Remove folder (contents move to parent)
+
+On individual summaries:
+- **Move to Folder** — Pick a destination folder
+
+### `/organize` Command
+
+- **First time** (no folders exist): Batch-categorizes all your existing podcasts into AI-generated folders
+- **After that**: Triggers an AI cleanup pass — merges similar folders, splits large ones, renames unclear ones
 
 ## Troubleshooting
 
@@ -181,7 +236,8 @@ knowledge-bot/
 │   │   ├── summarizer.py     # Claude AI summaries
 │   │   └── learning.py       # Preference learning
 │   └── storage/
-│       └── summaries.py      # JSON-based persistence
+│       ├── summaries.py      # JSON-based summary persistence
+│       └── categories.py     # Hierarchical folder/category system
 ├── Dockerfile                # Cloud deployment (Railway)
 ├── railway.toml              # Railway config
 ├── requirements.txt          # Full local dependencies

@@ -9,9 +9,9 @@ A Telegram bot that transforms podcast episodes into structured, email-ready sum
 ```
 ┌─────────────────┐     ┌──────────────────────┐     ┌─────────────────┐
 │  Telegram Bot   │────▶│   Processing Layer   │────▶│  JSON Storage   │
-│  (Interface)    │     │                      │     │  (Summaries)    │
-└─────────────────┘     │  - yt-dlp            │     └─────────────────┘
-                        │  - feedparser        │              │
+│  (Interface)    │     │                      │     │  (Summaries +   │
+└─────────────────┘     │  - yt-dlp            │     │   Categories)   │
+                        │  - feedparser        │     └─────────────────┘
                         │  - ffmpeg (compress) │              │
                         └──────────────────────┘              ▼
                                     │                 ┌─────────────────┐
@@ -19,9 +19,12 @@ A Telegram bot that transforms podcast episodes into structured, email-ready sum
                         ┌──────────────────────┐      │  (Claude API)   │
                         │  Transcription       │      │  - Summaries    │
                         │  - Groq (cloud)      │      │  - Refinement   │
-                        │  - OpenAI (cloud)    │      └─────────────────┘
-                        │  - faster-whisper    │              │
-                        └──────────────────────┘              ▼
+                        │  - OpenAI (cloud)    │      │  - Categorize   │
+                        │  - faster-whisper    │      │  - Reorganize   │
+                        └──────────────────────┘      │  - Search       │
+                                                      └─────────────────┘
+                                                              │
+                                                              ▼
                                                       ┌─────────────────┐
                                                       │ Learning System │
                                                       │ (Preferences)   │
@@ -50,6 +53,7 @@ A Telegram bot that transforms podcast episodes into structured, email-ready sum
 | `src/ai/learning.py` | Feedback tracking and preference learning system |
 | `src/processors/podcast.py` | Audio extraction (yt-dlp), compression (ffmpeg), Whisper transcription |
 | `src/storage/summaries.py` | JSON-based summary persistence |
+| `src/storage/categories.py` | Hierarchical folder/category storage with tree operations |
 | `Dockerfile` | Cloud build - python:3.11-slim + ffmpeg, uses requirements-cloud.txt |
 | `railway.toml` | Railway deploy config (dockerfile builder, restart on failure) |
 | `requirements.txt` | Full local deps (includes faster-whisper, sentence-transformers) |
@@ -107,6 +111,68 @@ This means on Railway you can set either `GROQ_API_KEY=gsk_...` or `OPENAI_API_K
 
 ---
 
+## Smart Folder System
+
+AI-managed hierarchical folder organization for podcast summaries. Podcasts are automatically categorized on save, and the folder structure evolves over time.
+
+### How It Works
+
+1. **Auto-categorization**: When a podcast is saved, Claude analyzes the title, show name, and summary content against the current folder tree, then files it into the best-matching folder (or creates a new one).
+2. **Dynamic reorganization**: Every 5th save, Claude reviews the full folder tree and can merge near-duplicates, split overgrown folders (>10 items), or rename unclear folders.
+3. **User-editable**: Users can create, rename, move, and delete folders via inline buttons in `/lookup`.
+4. **Smart search**: `/lookup` supports natural language queries — first tries substring match on titles/shows, then falls back to Claude semantic search with relevance scoring.
+
+### Data Model
+
+- **`Category`** dataclass: `id`, `name`, `emoji`, `description`, `parent_id`, `summary_ids`, timestamps
+- **Hierarchy**: Max 2 levels deep (parent → child). Enforced in `create_category()` and `move_category()`.
+- **Storage**: `{vault_path}/.categories.json` — includes a `save_count` field for triggering reorganization.
+- **Summary link**: Each `PodcastSummary` has a `categories: list[str]` field storing category IDs.
+
+### Key Methods
+
+**`src/storage/categories.py` — CategoryStorage:**
+- `create_category()`, `rename_category()`, `move_category()`, `delete_category()` — CRUD
+- `add_summary()`, `remove_summary()`, `move_summary()` — filing
+- `list_tree()` — nested dict structure for display/AI context
+- `find_by_name()` — fuzzy match for user input
+- `format_tree_display()` — formatted string for Telegram
+- `apply_reorganization()` — batch operations from AI (merge/create/move/rename)
+- `increment_save_count()` — tracks saves for reorg trigger
+
+**`src/ai/summarizer.py` — AI methods:**
+- `categorize_summary(title, show_name, summary_text, folder_tree)` → returns folder path + create flag
+- `reorganize_folders(folder_tree, summary_titles)` → returns list of operations
+- `search_summaries(query, summary_list)` → returns ranked matches with relevance scores (1-5)
+
+### Folder UI Flow (in `/lookup`)
+
+```
+/lookup → Library view (folder tree + recent 5)
+  ├── Type number → View summary detail
+  ├── Type folder name → Browse folder contents (paginated)
+  │     ├── Sub-folders listed first
+  │     ├── Summaries with pagination (10/page)
+  │     └── Buttons: New Sub-folder, Rename, Move, Delete, Back
+  └── Type text → Search (substring → semantic)
+        └── Results with relevance stars
+```
+
+### Summary Actions (in detail view)
+- Edit, Send as Email, **Move to Folder**, Delete, Back to Library
+
+### `/organize` Command
+- If no folders exist: batch-categorizes all existing podcasts
+- If folders exist: triggers AI reorganization pass
+
+### Design Decisions
+- **~20 folder cap**: AI prompt instructs Claude to reuse existing folders and keep total manageable
+- **Non-blocking categorization**: If categorization API call fails, the save still succeeds (logged as warning)
+- **Backward compatible**: Existing summaries without `categories` field load with `categories: []`. Use `/organize` to retroactively file them.
+- **Telegram message limits**: Folder tree display uses counts-only for sub-folders; pagination prevents exceeding 4096 char limit.
+
+---
+
 ## Common Bugs / Known Issues
 
 ### ConversationHandler Stuck State
@@ -155,7 +221,8 @@ Preferences stored in `data/learning.json`, injected into summarizer prompts.
 | `/start` | Welcome message |
 | `/help` | Show available commands |
 | `/podcast <url>` | Process a podcast |
-| `/lookup` | Browse saved summaries |
+| `/lookup` | Browse folders, search, and manage saved summaries |
+| `/organize` | AI-powered folder reorganization or batch categorization |
 | `/status` | Check processing queue and active sessions |
 | `/stop` | Cancel all stuck processes and clear session state |
 | `/stats` | View learning statistics |
