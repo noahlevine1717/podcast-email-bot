@@ -37,9 +37,17 @@ Send a podcast link, get back a structured summary with key points, notable quot
    | `RESEND_API_KEY` | No | For email features |
    | `EMAIL_ENABLED` | No | `true` to enable email |
 
-4. Deploy - Railway auto-builds from the Dockerfile
+4. **Configure a persistent volume** (important!):
+   - In your Railway project, go to your service
+   - Click **Settings** → **Volumes**
+   - Add a volume with mount path: `/data`
+   - This ensures your saved podcasts and folders persist across deploys
+
+5. Deploy - Railway auto-builds from the Dockerfile
 
    That's it! The bot will use Groq for fast free transcription, with OpenAI as automatic fallback if you added `OPENAI_WHISPER_KEY`.
+
+   **Note:** Without the volume configured in step 4, you'll lose all saved podcasts every time the bot redeploys.
 
 ### Option B: Run Locally
 
