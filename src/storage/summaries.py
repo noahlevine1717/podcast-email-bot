@@ -20,6 +20,11 @@ class PodcastSummary:
     duration: Optional[str]
     created_at: str
     updated_at: str
+    categories: list[str] = None
+
+    def __post_init__(self):
+        if self.categories is None:
+            self.categories = []
 
 
 class SummaryStorage:
@@ -38,6 +43,9 @@ class SummaryStorage:
                 with open(self.storage_path) as f:
                     data = json.load(f)
                     for item in data:
+                        # Backward compat: add categories if missing
+                        if "categories" not in item:
+                            item["categories"] = []
                         summary = PodcastSummary(**item)
                         self._summaries[summary.id] = summary
             except (json.JSONDecodeError, KeyError):
@@ -72,6 +80,7 @@ class SummaryStorage:
             duration=duration,
             created_at=now,
             updated_at=now,
+            categories=[],
         )
 
         self._summaries[summary_id] = summary
@@ -94,9 +103,24 @@ class SummaryStorage:
             duration=summary.duration,
             created_at=summary.created_at,
             updated_at=datetime.now().isoformat(),
+            categories=summary.categories,
         )
         self._save()
         return True
+
+    def update_categories(self, summary_id: str, category_ids: list[str]) -> bool:
+        """Update the categories list for a summary."""
+        if summary_id not in self._summaries:
+            return False
+
+        self._summaries[summary_id].categories = category_ids
+        self._summaries[summary_id].updated_at = datetime.now().isoformat()
+        self._save()
+        return True
+
+    def list_all_ids(self) -> list[str]:
+        """Get all summary IDs."""
+        return list(self._summaries.keys())
 
     def delete_summary(self, summary_id: str) -> bool:
         """Delete a summary."""

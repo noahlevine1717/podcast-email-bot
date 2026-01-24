@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import smtplib
+from typing import Optional
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pathlib import Path
@@ -26,6 +27,7 @@ from src.processors.thread import ThreadProcessor
 from src.storage.vault import VaultWriter
 from src.storage.vectors import VectorStore
 from src.storage.summaries import SummaryStorage
+from src.storage.categories import CategoryStorage
 from src.ai.learning import LearningSystem
 from src.digest.daily import DailyDigest, DigestScheduler
 from src.security import AccessControl, sanitize_error_message, validate_url
@@ -51,6 +53,7 @@ class KnowledgeBot:
         self.vault = VaultWriter(self.config.obsidian.vault_path)
         self.vector_store = VectorStore(self.config.obsidian.vault_path / ".vectors.db")
         self.summary_storage = SummaryStorage(self.config.obsidian.vault_path / ".summaries.json")
+        self.category_storage = CategoryStorage(self.config.obsidian.vault_path / ".categories.json")
         self.learning = LearningSystem(self.config.obsidian.vault_path / ".learning.json")
         self.podcast_processor = PodcastProcessor(self.config, self.vault)
         self.article_processor = ArticleProcessor(self.config, self.vault)
@@ -154,8 +157,9 @@ class KnowledgeBot:
             "**Summary Modes:**\n"
             "• **AI-Only** - Let AI generate the full summary automatically\n"
             "• **Interactive** - Add your own notes while it transcribes, then AI enhances them\n\n"
-            "**Browse Past Summaries:**\n"
-            "• `/lookup` - View your previous podcast summaries\n\n"
+            "**Browse & Organize:**\n"
+            "• `/lookup` - Browse folders, recent, or search your library\n"
+            "• `/organize` - AI-powered folder organization\n\n"
             "**Other:**\n"
             "• `/status` - Check bot status (works anytime)\n"
             "• `/stop` - Cancel stuck processes\n"
@@ -655,6 +659,14 @@ class KnowledgeBot:
                     'show': session['metadata'].show_name,
                 }
 
+                # Categorize the summary
+                folder_msg = await self._categorize_saved_summary(
+                    summary_id=summary_id,
+                    title=session['metadata'].title,
+                    show_name=session['metadata'].show_name,
+                    summary_text=session['draft_email'],
+                )
+
                 # Update the saving message to show success
                 await query.edit_message_text("✅ **Saved!**")
 
@@ -666,9 +678,11 @@ class KnowledgeBot:
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
+                done_text = f"{folder_msg}\n\n" if folder_msg else ""
+                done_text += "**What's next?**\n\nUse `/lookup` anytime to view and edit your saved summaries."
+
                 await query.message.reply_text(
-                    f"**What's next?**\n\n"
-                    f"Use `/lookup` anytime to view and edit your saved summaries.",
+                    done_text,
                     parse_mode="Markdown",
                     reply_markup=reply_markup,
                 )
@@ -770,6 +784,158 @@ class KnowledgeBot:
         )
 
         return vault_path
+
+    async def _categorize_saved_summary(
+        self,
+        summary_id: str,
+        title: str,
+        show_name: Optional[str],
+        summary_text: str,
+    ) -> str:
+        """Categorize a newly saved summary. Returns a status message."""
+        try:
+            from src.ai.summarizer import Summarizer
+            summarizer = Summarizer(self.config)
+
+            folder_tree = self.category_storage.list_tree()
+            result = await summarizer.categorize_summary(
+                title=title,
+                show_name=show_name,
+                summary_text=summary_text,
+                folder_tree=folder_tree,
+            )
+
+            folder_path = result.get("folder_path", [])
+            create_new = result.get("create_new", False)
+
+            if not folder_path:
+                return ""
+
+            # Find or create the folder
+            category_id = self._resolve_folder_path(folder_path, result)
+
+            if category_id:
+                self.category_storage.add_summary(summary_id, category_id)
+                # Update summary's categories list
+                cats = self.category_storage.get_categories_for_summary(summary_id)
+                self.summary_storage.update_categories(summary_id, [c.id for c in cats])
+
+                cat = self.category_storage.get_category(category_id)
+                emoji = cat.emoji if cat else ""
+                folder_name = cat.name if cat else folder_path[-1]
+                folder_msg = f"{emoji} Filed in: **{folder_name}**"
+            else:
+                folder_msg = ""
+
+            # Check if we should trigger reorganization (every 5 saves)
+            save_count = self.category_storage.increment_save_count()
+            if save_count % 5 == 0 and self.category_storage.total_categories() > 2:
+                reorg_msg = await self._trigger_reorganization()
+                if reorg_msg:
+                    folder_msg += f"\n\n{reorg_msg}"
+
+            return folder_msg
+
+        except Exception as e:
+            logger.warning(f"Categorization failed (non-critical): {e}")
+            return ""
+
+    def _resolve_folder_path(self, folder_path: list[str], ai_result: dict) -> Optional[str]:
+        """Resolve a folder path to a category ID, creating folders as needed."""
+        if not folder_path:
+            return None
+
+        # Find or create parent folder
+        parent_name = folder_path[0]
+        parent_matches = self.category_storage.find_by_name(parent_name)
+        parent_id = None
+
+        # Look for exact match at root level
+        for m in parent_matches:
+            if m.parent_id is None and m.name.lower() == parent_name.lower():
+                parent_id = m.id
+                break
+
+        if not parent_id:
+            # Create the parent folder
+            emoji = ai_result.get("emoji", "") if len(folder_path) == 1 else ""
+            desc = ai_result.get("description", "") if len(folder_path) == 1 else ""
+            parent_id = self.category_storage.create_category(
+                name=parent_name,
+                emoji=emoji,
+                description=desc,
+            )
+
+        if len(folder_path) == 1:
+            return parent_id
+
+        # Find or create child folder
+        child_name = folder_path[1]
+        children = self.category_storage.get_children(parent_id)
+        child_id = None
+
+        for child in children:
+            if child.name.lower() == child_name.lower():
+                child_id = child.id
+                break
+
+        if not child_id:
+            child_id = self.category_storage.create_category(
+                name=child_name,
+                emoji=ai_result.get("emoji", ""),
+                description=ai_result.get("description", ""),
+                parent_id=parent_id,
+            )
+
+        return child_id
+
+    async def _trigger_reorganization(self) -> str:
+        """Trigger AI-powered folder reorganization. Returns user-facing message."""
+        try:
+            from src.ai.summarizer import Summarizer
+            summarizer = Summarizer(self.config)
+
+            folder_tree = self.category_storage.list_tree()
+
+            # Build summary titles map
+            summary_titles = {}
+            for cat_data in folder_tree:
+                cat = self.category_storage.get_category(cat_data["id"])
+                if cat:
+                    for sid in cat.summary_ids:
+                        s = self.summary_storage.get_summary(sid)
+                        if s:
+                            label = s.title
+                            if s.show:
+                                label += f" ({s.show})"
+                            summary_titles[sid] = label
+                for child_data in cat_data.get("children", []):
+                    child = self.category_storage.get_category(child_data["id"])
+                    if child:
+                        for sid in child.summary_ids:
+                            s = self.summary_storage.get_summary(sid)
+                            if s:
+                                label = s.title
+                                if s.show:
+                                    label += f" ({s.show})"
+                                summary_titles[sid] = label
+
+            operations = await summarizer.reorganize_folders(folder_tree, summary_titles)
+
+            if not operations:
+                return ""
+
+            changes = self.category_storage.apply_reorganization(operations)
+
+            if changes:
+                changes_text = "\n".join(f"  • {c}" for c in changes[:5])
+                return f"🔄 **Reorganized folders:**\n{changes_text}"
+
+            return ""
+
+        except Exception as e:
+            logger.warning(f"Reorganization failed (non-critical): {e}")
+            return ""
 
     async def podcast_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Cancel the podcast conversation."""
@@ -998,6 +1164,11 @@ class KnowledgeBot:
             del self._lookup_state[user_id]
             cancelled.append("Lookup mode")
 
+        # Clear folder action state
+        if hasattr(self, '_folder_action_state') and user_id in self._folder_action_state:
+            del self._folder_action_state[user_id]
+            cancelled.append("Folder action mode")
+
         # Clear saved summaries selection
         if hasattr(self, '_saved_summaries') and user_id in self._saved_summaries:
             del self._saved_summaries[user_id]
@@ -1087,41 +1258,77 @@ class KnowledgeBot:
             await update.message.reply_text(f"❌ Error generating digest: {sanitize_error_message(e)}")
 
     async def lookup_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /lookup command to browse historical podcast summaries."""
-        if not await self._check_power_and_access(update):
+        """Handle /lookup command - show folder tree + recent summaries."""
+        # Use effective_message to work from both commands and callbacks
+        message = update.effective_message
+        if not message:
             return
 
-        # Get list of podcast summaries from storage
-        summaries = self.summary_storage.list_summaries(limit=10)
+        if not self._check_access(update):
+            return
+        if not self.is_powered_on:
+            await message.reply_text("🔴 Bot is in sleep mode. Use /poweron to wake it up.")
+            return
 
-        if not summaries:
-            await update.message.reply_text(
+        user_id = update.effective_user.id
+        summaries = self.summary_storage.list_summaries(limit=5)
+
+        if not summaries and self.category_storage.total_categories() == 0:
+            await message.reply_text(
                 "📂 No podcast summaries found yet.\n\n"
                 "Process some podcasts with /podcast first!"
             )
             return
 
-        # Build list message
-        msg = "📚 **Recent Podcast Summaries**\n\n"
-        for i, item in enumerate(summaries, 1):
-            show_info = f" ({item.show})" if item.show else ""
-            # Parse date from ISO format
-            date_str = item.created_at[:10] if item.created_at else ""
-            msg += f"{i}. **{item.title}**{show_info}\n"
-            msg += f"   📅 {date_str}\n\n"
+        # Build the library view
+        msg = "📚 **Your Podcast Library**\n\n"
 
-        msg += "─────────────────\n"
-        msg += "Reply with a number to view that summary."
+        # Show folder tree
+        tree_display = self.category_storage.format_tree_display()
+        if tree_display:
+            msg += tree_display + "\n\n"
+
+        # Show uncategorized count
+        all_ids = self.summary_storage.list_all_ids()
+        uncategorized = self.category_storage.get_uncategorized_summaries(all_ids)
+        if uncategorized:
+            msg += f"📋 Uncategorized ({len(uncategorized)})\n\n"
+
+        # Show recent summaries
+        if summaries:
+            msg += "─────────────────\n"
+            msg += "📋 **Recent:**\n"
+            for i, item in enumerate(summaries, 1):
+                show_info = f" — {item.show}" if item.show else ""
+                date_str = ""
+                if item.created_at:
+                    try:
+                        from datetime import datetime as dt
+                        d = dt.fromisoformat(item.created_at)
+                        date_str = f" ({d.strftime('%b %d')})"
+                    except (ValueError, TypeError):
+                        pass
+                msg += f"  {i}. {item.title}{show_info}{date_str}\n"
+
+        msg += "\n─────────────────\n"
+        msg += "Reply with:\n"
+        msg += "• A **number** to view a recent summary\n"
+        msg += "• A **folder name** to browse that folder\n"
+        msg += "• A **question** to search your library"
 
         # Store lookup state
-        user_id = update.effective_user.id
-        self._lookup_state = self._lookup_state if hasattr(self, '_lookup_state') else {}
-        self._lookup_state[user_id] = summaries
+        if not hasattr(self, '_lookup_state'):
+            self._lookup_state = {}
+        self._lookup_state[user_id] = {
+            "mode": "library",
+            "recent": summaries,
+            "page": 0,
+        }
 
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await message.reply_text(msg, parse_mode="Markdown")
 
     async def lookup_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle selection from lookup list."""
+        """Handle selection from lookup - number, folder name, or search query."""
         if not self._check_access(update):
             return
 
@@ -1129,46 +1336,247 @@ class KnowledgeBot:
         if not hasattr(self, '_lookup_state') or user_id not in self._lookup_state:
             return
 
+        text = update.message.text.strip()
+        state = self._lookup_state[user_id]
+
+        # Check if it's a number (recent summary selection or folder item)
         try:
-            selection = int(update.message.text.strip())
-            summaries = self._lookup_state[user_id]
-
-            if 1 <= selection <= len(summaries):
-                item = summaries[selection - 1]
-
-                # Store the selected item for actions
-                if not hasattr(self, '_saved_summaries'):
-                    self._saved_summaries = {}
-                self._saved_summaries[user_id] = {
-                    'id': item.id,
-                    'title': item.title,
-                    'show': item.show,
-                    'transcript': item.transcript,
-                }
-
-                # Show summary with action buttons
-                keyboard = [
-                    [InlineKeyboardButton("✏️ Edit", callback_data="saved_edit")],
-                    [InlineKeyboardButton("📧 Send as Email", callback_data="saved_email")],
-                    [InlineKeyboardButton("🗑️ Delete", callback_data="saved_delete")],
-                    [InlineKeyboardButton("📚 Back to List", callback_data="saved_back")],
-                    [InlineKeyboardButton("✅ Done", callback_data="saved_done")],
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-
-                show_info = f" from **{item.show}**" if item.show else ""
-                date_str = item.created_at[:10] if item.created_at else ""
-                full_text = (
-                    f"📧 **{item.title}**{show_info}\n"
-                    f"📅 {date_str}\n\n"
-                    f"─────────────────\n\n"
-                    f"{item.email_content}"
-                )
-                await self._reply_long_message(update, full_text, reply_markup=reply_markup)
-            else:
-                await update.message.reply_text(f"Please enter a number between 1 and {len(summaries)}")
+            selection = int(text)
+            if state.get("mode") == "library":
+                # Select from recent list
+                summaries = state.get("recent", [])
+                if 1 <= selection <= len(summaries):
+                    await self._show_summary_detail(update, summaries[selection - 1])
+                    return
+                else:
+                    await update.message.reply_text(f"Please enter a number between 1 and {len(summaries)}")
+                    return
+            elif state.get("mode") == "folder":
+                # Select from folder item list
+                items = state.get("items", [])
+                if 1 <= selection <= len(items):
+                    item = items[selection - 1]
+                    summary = self.summary_storage.get_summary(item["id"])
+                    if summary:
+                        await self._show_summary_detail(update, summary)
+                    return
+                else:
+                    await update.message.reply_text(f"Please enter a number between 1 and {len(items)}")
+                    return
         except ValueError:
-            pass  # Not a number, ignore
+            pass
+
+        # Check if it matches a folder name
+        folder_matches = self.category_storage.find_by_name(text)
+        if folder_matches:
+            # Show the first matching folder
+            await self._show_folder_contents(update, folder_matches[0].id)
+            return
+
+        # Otherwise, treat as a search query
+        await self._handle_search(update, text)
+
+    async def _show_summary_detail(self, update: Update, item) -> None:
+        """Show a single summary with action buttons."""
+        user_id = update.effective_user.id
+
+        if not hasattr(self, '_saved_summaries'):
+            self._saved_summaries = {}
+        self._saved_summaries[user_id] = {
+            'id': item.id,
+            'title': item.title,
+            'show': item.show,
+            'transcript': item.transcript,
+        }
+
+        # Get categories for this summary
+        cats = self.category_storage.get_categories_for_summary(item.id)
+        cat_info = ""
+        if cats:
+            cat_names = [f"{c.emoji} {c.name}" for c in cats]
+            cat_info = f"📁 {', '.join(cat_names)}\n"
+
+        keyboard = [
+            [InlineKeyboardButton("✏️ Edit", callback_data="saved_edit")],
+            [InlineKeyboardButton("📧 Send as Email", callback_data="saved_email")],
+            [InlineKeyboardButton("📁 Move to Folder", callback_data="saved_move")],
+            [InlineKeyboardButton("🗑️ Delete", callback_data="saved_delete")],
+            [InlineKeyboardButton("📚 Back to Library", callback_data="saved_back")],
+            [InlineKeyboardButton("✅ Done", callback_data="saved_done")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        show_info = f" from **{item.show}**" if item.show else ""
+        date_str = item.created_at[:10] if item.created_at else ""
+        full_text = (
+            f"📧 **{item.title}**{show_info}\n"
+            f"📅 {date_str}\n"
+            f"{cat_info}"
+            f"\n─────────────────\n\n"
+            f"{item.email_content}"
+        )
+        await self._reply_long_message(update, full_text, reply_markup=reply_markup)
+
+    async def _show_folder_contents(self, update: Update, category_id: str, page: int = 0) -> None:
+        """Show contents of a folder with pagination."""
+        user_id = update.effective_user.id
+        cat = self.category_storage.get_category(category_id)
+        if not cat:
+            await update.message.reply_text("Folder not found.")
+            return
+
+        msg = f"{cat.emoji} **{cat.name}**\n\n"
+
+        # Show sub-folders first
+        children = self.category_storage.get_children(category_id)
+        if children:
+            for child in children:
+                count = len(child.summary_ids)
+                msg += f"  {child.emoji} {child.name} ({count})\n"
+            msg += "\n"
+
+        # Show summaries in this folder with pagination
+        items_per_page = 10
+        start = page * items_per_page
+        summary_items = []
+
+        for sid in cat.summary_ids:
+            s = self.summary_storage.get_summary(sid)
+            if s:
+                summary_items.append({"id": s.id, "title": s.title, "show": s.show})
+
+        total = len(summary_items)
+        page_items = summary_items[start:start + items_per_page]
+
+        if page_items:
+            for i, item in enumerate(page_items, start + 1):
+                show_info = f" — {item['show']}" if item.get('show') else ""
+                msg += f"  {i}. {item['title']}{show_info}\n"
+
+            if total > items_per_page:
+                msg += f"\nShowing {start + 1}-{min(start + items_per_page, total)} of {total}\n"
+        else:
+            msg += "  _(empty folder)_\n"
+
+        msg += "\n─────────────────\n"
+
+        # Build navigation buttons
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"folder_page_{category_id}_{page-1}"))
+        if start + items_per_page < total:
+            nav_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"folder_page_{category_id}_{page+1}"))
+
+        keyboard = []
+        if nav_buttons:
+            keyboard.append(nav_buttons)
+        keyboard.append([
+            InlineKeyboardButton("➕ New Sub-folder", callback_data=f"folder_new_{category_id}"),
+            InlineKeyboardButton("✏️ Rename", callback_data=f"folder_rename_{category_id}"),
+        ])
+        keyboard.append([
+            InlineKeyboardButton("📦 Move Folder", callback_data=f"folder_move_{category_id}"),
+            InlineKeyboardButton("🗑️ Delete Folder", callback_data=f"folder_delete_{category_id}"),
+        ])
+        keyboard.append([InlineKeyboardButton("📚 Back to Library", callback_data="saved_back")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Store folder browse state
+        if not hasattr(self, '_lookup_state'):
+            self._lookup_state = {}
+        self._lookup_state[user_id] = {
+            "mode": "folder",
+            "category_id": category_id,
+            "items": page_items,
+            "page": page,
+        }
+
+        msg += "Reply with a **number** to view, or a **folder name** to browse."
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+
+    async def _handle_search(self, update: Update, query: str) -> None:
+        """Handle search query - try substring match first, then AI semantic search."""
+        user_id = update.effective_user.id
+
+        # First: try simple substring match on titles and show names
+        all_summaries = self.summary_storage.list_summaries(limit=100)
+        query_lower = query.lower()
+
+        simple_matches = []
+        for s in all_summaries:
+            if query_lower in s.title.lower() or (s.show and query_lower in s.show.lower()):
+                simple_matches.append(s)
+
+        if simple_matches:
+            msg = f"🔍 **Found {len(simple_matches)} match{'es' if len(simple_matches) != 1 else ''}:**\n\n"
+            display = simple_matches[:5]
+            for i, item in enumerate(display, 1):
+                show_info = f" — {item.show}" if item.show else ""
+                msg += f"  {i}. {item.title}{show_info}\n"
+
+            if not hasattr(self, '_lookup_state'):
+                self._lookup_state = {}
+            self._lookup_state[user_id] = {
+                "mode": "folder",
+                "items": [{"id": s.id, "title": s.title, "show": s.show} for s in display],
+                "page": 0,
+            }
+
+            msg += "\nReply with a number to view."
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            return
+
+        # No simple match: try semantic search via AI
+        if not all_summaries:
+            await update.message.reply_text("🔍 No results found.")
+            return
+
+        await update.message.reply_text("🔍 Searching...")
+
+        try:
+            from src.ai.summarizer import Summarizer
+            summarizer = Summarizer(self.config)
+
+            summary_list = [
+                {
+                    "id": s.id,
+                    "title": s.title,
+                    "show": s.show or "",
+                    "preview": s.email_content[:150] if s.email_content else "",
+                }
+                for s in all_summaries[:40]
+            ]
+
+            results = await summarizer.search_summaries(query, summary_list)
+
+            if not results:
+                await update.message.reply_text("🔍 No relevant results found for your query.")
+                return
+
+            msg = f"🔍 **Found {len(results)} match{'es' if len(results) != 1 else ''}:**\n\n"
+            items_for_state = []
+            for i, r in enumerate(results[:5], 1):
+                relevance = "★" * min(r.get("relevance", 3), 5)
+                title = r.get("title", "Unknown")
+                reason = r.get("reason", "")
+                msg += f"  {i}. {title}\n     {relevance} _{reason}_\n\n"
+                items_for_state.append({"id": r["id"], "title": title, "show": ""})
+
+            if not hasattr(self, '_lookup_state'):
+                self._lookup_state = {}
+            self._lookup_state[user_id] = {
+                "mode": "folder",
+                "items": items_for_state,
+                "page": 0,
+            }
+
+            msg += "Reply with a number to view."
+            await update.message.reply_text(msg, parse_mode="Markdown")
+
+        except Exception as e:
+            logger.warning(f"Search failed: {e}")
+            await update.message.reply_text("🔍 Search failed. Try a different query.")
 
     async def saved_action_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle actions on saved summaries (edit, email, back, done)."""
@@ -1260,6 +1668,28 @@ class KnowledgeBot:
         elif query.data == "saved_delete_cancel":
             await query.edit_message_reply_markup(reply_markup=None)
             await query.message.reply_text("❌ Delete cancelled.")
+
+        elif query.data == "saved_move":
+            if saved_info:
+                # Show folder picker for moving summary
+                keyboard = []
+                for cat in self.category_storage.get_flat_list():
+                    indent = "  " if cat.parent_id else ""
+                    keyboard.append([InlineKeyboardButton(
+                        f"{indent}{cat.emoji} {cat.name}",
+                        callback_data=f"summary_moveto_{saved_info['id']}_{cat.id}"
+                    )])
+                keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="summary_move_cancel")])
+
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text(
+                    f"📁 **Move:** {saved_info['title']}\n\nSelect destination folder:",
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup,
+                )
+            else:
+                await query.message.reply_text("❌ No summary selected.")
 
         elif query.data == "saved_email":
             if not self.config.email.enabled:
@@ -1625,6 +2055,345 @@ class KnowledgeBot:
             await query.edit_message_reply_markup(reply_markup=None)
             await query.message.reply_text("❌ Changes discarded.")
 
+    async def folder_action_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle folder management callbacks (new, rename, move, delete, page)."""
+        query = update.callback_query
+        await query.answer()
+
+        user_id = update.effective_user.id
+        data = query.data
+
+        if data.startswith("folder_page_"):
+            # Pagination: folder_page_{category_id}_{page}
+            parts = data.replace("folder_page_", "").rsplit("_", 1)
+            if len(parts) == 2:
+                category_id, page = parts[0], int(parts[1])
+                await query.edit_message_reply_markup(reply_markup=None)
+                # Re-show folder with new page
+                await self._show_folder_contents_via_query(query, category_id, page)
+
+        elif data.startswith("folder_new_"):
+            # Create sub-folder
+            parent_id = data.replace("folder_new_", "")
+            if not hasattr(self, '_folder_action_state'):
+                self._folder_action_state = {}
+            self._folder_action_state[user_id] = {
+                "action": "new_subfolder",
+                "parent_id": parent_id,
+            }
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(
+                "📁 **New Sub-folder**\n\n"
+                "Type the folder name (with optional emoji prefix):\n"
+                "Example: `🤖 AI & Machine Learning`\n\n"
+                "Or type `/cancel` to go back.",
+                parse_mode="Markdown",
+            )
+
+        elif data.startswith("folder_rename_"):
+            category_id = data.replace("folder_rename_", "")
+            cat = self.category_storage.get_category(category_id)
+            if not cat:
+                await query.message.reply_text("Folder not found.")
+                return
+            if not hasattr(self, '_folder_action_state'):
+                self._folder_action_state = {}
+            self._folder_action_state[user_id] = {
+                "action": "rename",
+                "category_id": category_id,
+            }
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(
+                f"✏️ **Rename Folder:** {cat.emoji} {cat.name}\n\n"
+                "Type the new name (with optional emoji prefix):\n"
+                "Example: `🎯 New Name`\n\n"
+                "Or type `/cancel` to go back.",
+                parse_mode="Markdown",
+            )
+
+        elif data.startswith("folder_move_"):
+            category_id = data.replace("folder_move_", "")
+            cat = self.category_storage.get_category(category_id)
+            if not cat:
+                await query.message.reply_text("Folder not found.")
+                return
+
+            # Show folder picker for re-parenting
+            keyboard = []
+            keyboard.append([InlineKeyboardButton("📚 Top Level (no parent)", callback_data=f"folder_moveto_{category_id}_none")])
+            for root in self.category_storage.list_root_categories():
+                if root.id != category_id:
+                    keyboard.append([InlineKeyboardButton(
+                        f"{root.emoji} {root.name}",
+                        callback_data=f"folder_moveto_{category_id}_{root.id}"
+                    )])
+            keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="folder_move_cancel")])
+
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(
+                f"📦 **Move Folder:** {cat.emoji} {cat.name}\n\n"
+                "Select new parent:",
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+
+        elif data.startswith("folder_moveto_"):
+            # folder_moveto_{category_id}_{new_parent_id_or_none}
+            parts = data.replace("folder_moveto_", "").rsplit("_", 1)
+            if len(parts) == 2:
+                category_id = parts[0]
+                new_parent = None if parts[1] == "none" else parts[1]
+                success = self.category_storage.move_category(category_id, new_parent)
+                await query.edit_message_reply_markup(reply_markup=None)
+                if success:
+                    await query.message.reply_text("✅ Folder moved! Use `/lookup` to see the updated library.")
+                else:
+                    await query.message.reply_text("❌ Could not move folder (check nesting constraints).")
+
+        elif data == "folder_move_cancel":
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("❌ Move cancelled.")
+
+        elif data.startswith("folder_delete_"):
+            category_id = data.replace("folder_delete_", "")
+            cat = self.category_storage.get_category(category_id)
+            if not cat:
+                await query.message.reply_text("Folder not found.")
+                return
+
+            count = len(cat.summary_ids)
+            children_count = len(self.category_storage.get_children(category_id))
+
+            keyboard = [
+                [InlineKeyboardButton("⚠️ Yes, Delete Folder", callback_data=f"folder_delete_confirm_{category_id}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="folder_delete_cancel")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_reply_markup(reply_markup=None)
+
+            warning = ""
+            if count > 0:
+                parent_info = "parent folder" if cat.parent_id else "uncategorized"
+                warning = f"\n\n⚠️ {count} podcast(s) will be moved to {parent_info}."
+            if children_count > 0:
+                warning += f"\n⚠️ {children_count} sub-folder(s) will be re-parented."
+
+            await query.message.reply_text(
+                f"🗑️ **Delete Folder:** {cat.emoji} {cat.name}?{warning}",
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+
+        elif data.startswith("folder_delete_confirm_"):
+            category_id = data.replace("folder_delete_confirm_", "")
+            cat = self.category_storage.get_category(category_id)
+            name = f"{cat.emoji} {cat.name}" if cat else "folder"
+            self.category_storage.delete_category(category_id)
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(f"✅ Deleted {name}. Use `/lookup` to see updated library.")
+
+        elif data == "folder_delete_cancel":
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("❌ Delete cancelled.")
+
+        elif data.startswith("summary_moveto_"):
+            # summary_moveto_{summary_id}_{category_id}
+            parts = data.replace("summary_moveto_", "").split("_", 1)
+            if len(parts) == 2:
+                summary_id, target_cat_id = parts
+                # Remove from all current categories
+                current_cats = self.category_storage.get_categories_for_summary(summary_id)
+                for c in current_cats:
+                    self.category_storage.remove_summary(summary_id, c.id)
+                # Add to new category
+                self.category_storage.add_summary(summary_id, target_cat_id)
+                # Update summary record
+                new_cats = self.category_storage.get_categories_for_summary(summary_id)
+                self.summary_storage.update_categories(summary_id, [c.id for c in new_cats])
+
+                target = self.category_storage.get_category(target_cat_id)
+                name = f"{target.emoji} {target.name}" if target else "folder"
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text(f"✅ Moved to {name}!")
+
+        elif data == "summary_move_cancel":
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("❌ Move cancelled.")
+
+    async def _show_folder_contents_via_query(self, query, category_id: str, page: int = 0) -> None:
+        """Show folder contents in response to a callback query."""
+        cat = self.category_storage.get_category(category_id)
+        if not cat:
+            await query.message.reply_text("Folder not found.")
+            return
+
+        user_id = query.from_user.id
+        msg = f"{cat.emoji} **{cat.name}**\n\n"
+
+        children = self.category_storage.get_children(category_id)
+        if children:
+            for child in children:
+                count = len(child.summary_ids)
+                msg += f"  {child.emoji} {child.name} ({count})\n"
+            msg += "\n"
+
+        items_per_page = 10
+        start = page * items_per_page
+        summary_items = []
+        for sid in cat.summary_ids:
+            s = self.summary_storage.get_summary(sid)
+            if s:
+                summary_items.append({"id": s.id, "title": s.title, "show": s.show})
+
+        total = len(summary_items)
+        page_items = summary_items[start:start + items_per_page]
+
+        if page_items:
+            for i, item in enumerate(page_items, start + 1):
+                show_info = f" — {item['show']}" if item.get('show') else ""
+                msg += f"  {i}. {item['title']}{show_info}\n"
+            if total > items_per_page:
+                msg += f"\nShowing {start + 1}-{min(start + items_per_page, total)} of {total}\n"
+        else:
+            msg += "  _(empty folder)_\n"
+
+        msg += "\n─────────────────\n"
+        msg += "Reply with a **number** to view, or a **folder name** to browse."
+
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"folder_page_{category_id}_{page-1}"))
+        if start + items_per_page < total:
+            nav_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"folder_page_{category_id}_{page+1}"))
+
+        keyboard = []
+        if nav_buttons:
+            keyboard.append(nav_buttons)
+        keyboard.append([InlineKeyboardButton("📚 Back to Library", callback_data="saved_back")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        if not hasattr(self, '_lookup_state'):
+            self._lookup_state = {}
+        self._lookup_state[user_id] = {
+            "mode": "folder",
+            "category_id": category_id,
+            "items": page_items,
+            "page": page,
+        }
+
+        await query.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+
+    async def organize_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /organize command - manually trigger AI reorganization."""
+        if not await self._check_power_and_access(update):
+            return
+
+        if self.category_storage.total_categories() == 0:
+            # If no categories exist, batch-categorize all existing summaries
+            all_summaries = self.summary_storage.list_summaries(limit=100)
+            if not all_summaries:
+                await update.message.reply_text("No podcasts to organize yet!")
+                return
+
+            await update.message.reply_text(f"📂 Organizing {len(all_summaries)} podcasts into folders...")
+
+            categorized = 0
+            for s in all_summaries:
+                result_msg = await self._categorize_saved_summary(
+                    summary_id=s.id,
+                    title=s.title,
+                    show_name=s.show,
+                    summary_text=s.email_content,
+                )
+                if result_msg:
+                    categorized += 1
+
+            tree = self.category_storage.format_tree_display()
+            await update.message.reply_text(
+                f"✅ **Organized {categorized} podcasts!**\n\n{tree}\n\n"
+                "Use `/lookup` to browse your library.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text("🔄 Reorganizing folders...")
+            reorg_msg = await self._trigger_reorganization()
+            if reorg_msg:
+                await update.message.reply_text(
+                    f"{reorg_msg}\n\nUse `/lookup` to browse.",
+                    parse_mode="Markdown",
+                )
+            else:
+                await update.message.reply_text("✅ Your folder structure looks good — no changes needed.")
+
+    async def _handle_folder_action_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """Handle folder action text input (new subfolder name, rename). Returns True if handled."""
+        user_id = update.effective_user.id
+        if not hasattr(self, '_folder_action_state') or user_id not in self._folder_action_state:
+            return False
+
+        text = update.message.text.strip()
+
+        if text.lower() == '/cancel':
+            del self._folder_action_state[user_id]
+            await update.message.reply_text("❌ Cancelled.")
+            return True
+
+        state = self._folder_action_state[user_id]
+
+        # Parse emoji from input (first character if it's an emoji, or first word before space)
+        emoji = ""
+        name = text
+        if text and not text[0].isalnum():
+            # First char might be an emoji
+            # Simple heuristic: if first char is non-ASCII, treat as emoji
+            first_char = text[0]
+            if ord(first_char) > 127:
+                emoji = first_char
+                name = text[1:].strip()
+            # Check for multi-byte emoji (up to 2 chars)
+            elif len(text) > 1 and ord(text[1]) > 127:
+                emoji = text[:2]
+                name = text[2:].strip()
+
+        if not name:
+            await update.message.reply_text("Please provide a valid name.")
+            return True
+
+        if state["action"] == "new_subfolder":
+            parent_id = state["parent_id"]
+            try:
+                cat_id = self.category_storage.create_category(
+                    name=name,
+                    emoji=emoji,
+                    parent_id=parent_id,
+                )
+                await update.message.reply_text(
+                    f"✅ Created folder: {emoji} **{name}**\n\n"
+                    "Use `/lookup` to browse.",
+                    parse_mode="Markdown",
+                )
+            except ValueError as e:
+                await update.message.reply_text(f"❌ {e}")
+
+        elif state["action"] == "rename":
+            category_id = state["category_id"]
+            success = self.category_storage.rename_category(
+                category_id, name, emoji if emoji else None
+            )
+            if success:
+                await update.message.reply_text(
+                    f"✅ Renamed to: {emoji} **{name}**\n\n"
+                    "Use `/lookup` to browse.",
+                    parse_mode="Markdown",
+                )
+            else:
+                await update.message.reply_text("❌ Failed to rename folder.")
+
+        del self._folder_action_state[user_id]
+        return True
+
     async def _handle_email_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         """Handle email address input. Returns True if handled."""
         user_id = update.effective_user.id
@@ -1702,6 +2471,10 @@ class KnowledgeBot:
 
         # Check for email input
         if await self._handle_email_input(update, context):
+            return
+
+        # Check for folder action input (new subfolder, rename)
+        if await self._handle_folder_action_input(update, context):
             return
 
         # Check for lookup selection
@@ -1807,6 +2580,7 @@ def main():
     application.add_handler(CommandHandler("stats", bot.stats_command))
     application.add_handler(podcast_conv_handler)
     application.add_handler(CommandHandler("lookup", bot.lookup_command))
+    application.add_handler(CommandHandler("organize", bot.organize_command))
     application.add_handler(CommandHandler("status", bot.status_command))
     application.add_handler(CommandHandler("stop", bot.stop_command))
     application.add_handler(CommandHandler("poweron", bot.poweron_command))
@@ -1822,6 +2596,15 @@ def main():
 
     # Handle edit actions (save, more feedback, cancel)
     application.add_handler(CallbackQueryHandler(bot.edit_action_callback, pattern="^edit_"))
+
+    # Handle email quick-send callbacks
+    application.add_handler(CallbackQueryHandler(bot.saved_action_callback, pattern="^email_"))
+
+    # Handle folder management actions (new, rename, move, delete, pagination)
+    application.add_handler(CallbackQueryHandler(bot.folder_action_callback, pattern="^folder_"))
+
+    # Handle summary move to folder
+    application.add_handler(CallbackQueryHandler(bot.folder_action_callback, pattern="^summary_move"))
 
     # Handle text messages (for lookup selection, email input, podcast links, and forwarded notes)
     application.add_handler(

@@ -352,6 +352,257 @@ Respond in JSON format:
 
         return result
 
+    async def categorize_summary(
+        self,
+        title: str,
+        show_name: Optional[str],
+        summary_text: str,
+        folder_tree: list[dict],
+    ) -> dict:
+        """Categorize a podcast summary into a folder.
+
+        Args:
+            title: Podcast episode title
+            show_name: Podcast show name
+            summary_text: First ~500 chars of the summary
+            folder_tree: Current folder tree structure from CategoryStorage.list_tree()
+
+        Returns:
+            dict with:
+                - folder_path: list[str] - e.g. ["Technology", "AI & Machine Learning"]
+                - create_new: bool - whether a new folder needs to be created
+                - emoji: str - emoji for new folder (only if create_new)
+                - description: str - description for new folder (only if create_new)
+        """
+        tree_description = ""
+        if folder_tree:
+            for root in folder_tree:
+                tree_description += f"- {root['emoji']} {root['name']}: {root.get('description', '')} ({root['count']} items)\n"
+                for child in root.get("children", []):
+                    tree_description += f"  - {child['emoji']} {child['name']}: {child.get('description', '')} ({child['count']} items)\n"
+        else:
+            tree_description = "(No folders exist yet)"
+
+        prompt = f"""You are organizing a podcast library into folders. Given a podcast summary and the current folder structure, decide where to file this podcast.
+
+CURRENT FOLDER STRUCTURE:
+{tree_description}
+
+NEW PODCAST TO CATEGORIZE:
+Title: {title}
+{f"Show: {show_name}" if show_name else ""}
+Summary preview: {summary_text[:500]}
+
+RULES:
+1. PREFER existing folders when possible — only create a new one if nothing fits
+2. Keep total folders under ~20 (currently {sum(1 + len(r.get('children', [])) for r in folder_tree)} folders)
+3. Folder hierarchy is max 2 levels: parent → child
+4. If creating new, pick a clear descriptive name and relevant emoji
+5. Return the folder path as [parent_name] or [parent_name, child_name]
+
+Respond in JSON:
+{{
+    "folder_path": ["Parent Name", "Child Name"],
+    "create_new": false,
+    "emoji": "",
+    "description": ""
+}}
+
+If creating a new folder:
+{{
+    "folder_path": ["Technology", "AI & Machine Learning"],
+    "create_new": true,
+    "emoji": "🤖",
+    "description": "Artificial intelligence, machine learning, and deep learning topics"
+}}"""
+
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        response_text = response.content[0].text
+
+        try:
+            if "```json" in response_text:
+                json_start = response_text.index("```json") + 7
+                json_end = response_text.index("```", json_start)
+                response_text = response_text[json_start:json_end]
+            elif "```" in response_text:
+                json_start = response_text.index("```") + 3
+                json_end = response_text.index("```", json_start)
+                response_text = response_text[json_start:json_end]
+
+            result = json.loads(response_text.strip())
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"Failed to parse categorization response: {e}")
+            result = {
+                "folder_path": ["Uncategorized"],
+                "create_new": True,
+                "emoji": "📋",
+                "description": "Podcasts pending categorization",
+            }
+
+        return result
+
+    async def reorganize_folders(
+        self,
+        folder_tree: list[dict],
+        summary_titles: dict[str, str],
+    ) -> list[dict]:
+        """Review folder structure and suggest reorganization.
+
+        Args:
+            folder_tree: Current folder tree with counts
+            summary_titles: Dict mapping summary_id -> "Title (Show)" for context
+
+        Returns:
+            List of operation dicts:
+                - {"op": "merge", "source_id": "...", "target_id": "..."}
+                - {"op": "create", "name": "...", "emoji": "...", "parent_id": "...", "summary_ids": [...]}
+                - {"op": "move_summaries", "summary_ids": [...], "to_id": "..."}
+                - {"op": "rename", "category_id": "...", "name": "...", "emoji": "..."}
+        """
+        if not folder_tree:
+            return []
+
+        # Build detailed tree description with IDs
+        tree_desc = ""
+        for root in folder_tree:
+            tree_desc += f"- ID:{root['id']} {root['emoji']} {root['name']} ({root['count']} items)\n"
+            for child in root.get("children", []):
+                tree_desc += f"  - ID:{child['id']} {child['emoji']} {child['name']} ({child['count']} items)\n"
+
+        # Build summary context
+        summary_context = "\n".join(
+            f"  {sid}: {title}" for sid, title in list(summary_titles.items())[:50]
+        )
+
+        prompt = f"""You are reorganizing a podcast library. Review the current folder structure and suggest improvements.
+
+CURRENT FOLDER STRUCTURE (with IDs):
+{tree_desc}
+
+PODCAST SUMMARIES (ID: Title):
+{summary_context}
+
+CONSIDER:
+1. MERGE near-duplicate folders (similar names or overlapping content)
+2. SPLIT folders with >10 items into sub-folders
+3. RENAME unclear folder names to be more descriptive
+4. Keep total folders manageable (~10-20 max)
+5. Keep hierarchy at max 2 levels
+
+If the structure looks good already, return an empty list.
+
+Respond with a JSON array of operations:
+[
+    {{"op": "merge", "source_id": "abc123", "target_id": "def456"}},
+    {{"op": "create", "name": "New Folder", "emoji": "📁", "parent_id": "abc123", "summary_ids": ["id1", "id2"]}},
+    {{"op": "move_summaries", "summary_ids": ["id1"], "to_id": "abc123"}},
+    {{"op": "rename", "category_id": "abc123", "name": "Better Name", "emoji": "🎯"}}
+]
+
+Return [] if no changes needed."""
+
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        response_text = response.content[0].text
+
+        try:
+            if "```json" in response_text:
+                json_start = response_text.index("```json") + 7
+                json_end = response_text.index("```", json_start)
+                response_text = response_text[json_start:json_end]
+            elif "```" in response_text:
+                json_start = response_text.index("```") + 3
+                json_end = response_text.index("```", json_start)
+                response_text = response_text[json_start:json_end]
+
+            operations = json.loads(response_text.strip())
+            if not isinstance(operations, list):
+                operations = []
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"Failed to parse reorganization response: {e}")
+            operations = []
+
+        return operations
+
+    async def search_summaries(
+        self,
+        query: str,
+        summary_list: list[dict],
+    ) -> list[dict]:
+        """Semantic search across podcast summaries.
+
+        Args:
+            query: User's natural language search query
+            summary_list: List of dicts with 'id', 'title', 'show', 'preview' (first 150 chars)
+
+        Returns:
+            List of matching dicts with 'id', 'title', 'relevance' (1-5 score), 'reason'
+        """
+        if not summary_list:
+            return []
+
+        # Build summary context
+        items_text = "\n".join(
+            f"- ID:{item['id']} | {item['title']}"
+            + (f" ({item['show']})" if item.get('show') else "")
+            + f" | {item['preview']}"
+            for item in summary_list[:40]  # Limit to avoid token overflow
+        )
+
+        prompt = f"""Search these podcast summaries for the user's query. Return the most relevant matches.
+
+USER QUERY: "{query}"
+
+AVAILABLE PODCASTS:
+{items_text}
+
+Return the top 3-5 most relevant matches (only include genuinely relevant ones).
+
+Respond in JSON format:
+[
+    {{"id": "abc123", "title": "Episode Title", "relevance": 5, "reason": "Directly discusses this topic"}},
+    {{"id": "def456", "title": "Episode Title", "relevance": 3, "reason": "Touches on related ideas"}}
+]
+
+If nothing is relevant, return [].
+Relevance scale: 5=exact match, 4=very relevant, 3=somewhat relevant, 2=tangentially related, 1=barely related (don't include 1s)."""
+
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        response_text = response.content[0].text
+
+        try:
+            if "```json" in response_text:
+                json_start = response_text.index("```json") + 7
+                json_end = response_text.index("```", json_start)
+                response_text = response_text[json_start:json_end]
+            elif "```" in response_text:
+                json_start = response_text.index("```") + 3
+                json_end = response_text.index("```", json_start)
+                response_text = response_text[json_start:json_end]
+
+            results = json.loads(response_text.strip())
+            if not isinstance(results, list):
+                results = []
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"Failed to parse search response: {e}")
+            results = []
+
+        return results
+
     async def generate_podcast_email(
         self,
         transcript: str,
