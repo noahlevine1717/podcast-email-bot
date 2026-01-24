@@ -665,14 +665,16 @@ class PodcastProcessor:
         return await self._download_with_ytdlp(url)
 
     async def _download_with_ytdlp(self, url: str) -> tuple[Path, PodcastMetadata]:
-        """Download using yt-dlp (supports many sources)."""
+        """Download using yt-dlp (supports many sources including video podcasts)."""
         import yt_dlp
 
         temp_dir = Path(tempfile.mkdtemp())
         output_template = str(temp_dir / "%(title)s.%(ext)s")
 
+        # Format selection prioritizes audio-only, falls back to extracting from video
+        # For video podcasts (Spotify, YouTube), this extracts just the audio track
         ydl_opts = {
-            "format": "bestaudio/best",
+            "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best[acodec!=none]",
             "outtmpl": output_template,
             "postprocessors": [
                 {
@@ -683,6 +685,12 @@ class PodcastProcessor:
             ],
             "quiet": True,
             "no_warnings": True,
+            # Avoid downloading video when audio is available
+            "extract_audio": True,
+            # For Spotify: ensure we get the right episode by using the URL directly
+            "noplaylist": True,
+            # Better error messages
+            "ignoreerrors": False,
         }
 
         loop = asyncio.get_event_loop()
@@ -695,15 +703,20 @@ class PodcastProcessor:
         info = await loop.run_in_executor(None, download)
 
         # Find the downloaded file
-        audio_files = list(temp_dir.glob("*.mp3")) + list(temp_dir.glob("*.m4a"))
+        audio_files = list(temp_dir.glob("*.mp3")) + list(temp_dir.glob("*.m4a")) + list(temp_dir.glob("*.opus")) + list(temp_dir.glob("*.webm"))
         if not audio_files:
-            raise ValueError("Failed to download audio")
+            raise ValueError("Failed to download audio - no audio file found after extraction")
 
         audio_path = audio_files[0]
 
+        # For video podcasts, the title might include extra info - clean it up
+        title = info.get("title", "Unknown")
+        # Remove common video podcast suffixes
+        title = re.sub(r'\s*[\|\-]\s*(Video|Full Episode|Official).*$', '', title, flags=re.IGNORECASE)
+
         metadata = PodcastMetadata(
-            title=info.get("title", "Unknown"),
-            show_name=info.get("series") or info.get("uploader"),
+            title=title,
+            show_name=info.get("series") or info.get("uploader") or info.get("channel"),
             date=info.get("upload_date"),
             duration=info.get("duration"),
             url=url,

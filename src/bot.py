@@ -424,6 +424,7 @@ class KnowledgeBot:
             keyboard = [
                 [InlineKeyboardButton("✅ Approve & Save", callback_data="podcast_approve")],
                 [InlineKeyboardButton("✏️ Provide Feedback", callback_data="podcast_feedback")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="podcast_cancel")],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -595,6 +596,7 @@ class KnowledgeBot:
             keyboard = [
                 [InlineKeyboardButton("✅ Approve & Save", callback_data="podcast_approve")],
                 [InlineKeyboardButton("✏️ Provide Feedback", callback_data="podcast_feedback")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="podcast_cancel")],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -708,6 +710,16 @@ class KnowledgeBot:
             )
             return PODCAST_REVIEW if in_conversation else None
 
+        elif query.data == "podcast_cancel":
+            # Cancel the podcast session
+            if user_id in self.podcast_sessions:
+                del self.podcast_sessions[user_id]
+            if hasattr(self, '_feedback_state') and user_id in self._feedback_state:
+                del self._feedback_state[user_id]
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("❌ Podcast session cancelled.")
+            return ConversationHandler.END if in_conversation else None
+
         return ConversationHandler.END if in_conversation else None
 
     async def podcast_feedback_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -752,6 +764,7 @@ class KnowledgeBot:
             keyboard = [
                 [InlineKeyboardButton("✅ Approve & Save", callback_data="podcast_approve")],
                 [InlineKeyboardButton("✏️ More Feedback", callback_data="podcast_feedback")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="podcast_cancel")],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -944,6 +957,49 @@ class KnowledgeBot:
             del self.podcast_sessions[user_id]
         await update.message.reply_text("❌ Podcast session cancelled.")
         return ConversationHandler.END
+
+    async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /cancel command - cancel any active operation."""
+        if not self._check_access(update):
+            return
+
+        user_id = update.effective_user.id
+        cancelled = []
+
+        # Clear podcast session
+        if user_id in self.podcast_sessions:
+            del self.podcast_sessions[user_id]
+            cancelled.append("Podcast processing")
+
+        # Clear feedback state
+        if hasattr(self, '_feedback_state') and user_id in self._feedback_state:
+            del self._feedback_state[user_id]
+            cancelled.append("Feedback mode")
+
+        # Clear edit state
+        if hasattr(self, '_edit_state') and user_id in self._edit_state:
+            del self._edit_state[user_id]
+            cancelled.append("Edit mode")
+
+        # Clear email state
+        if hasattr(self, '_email_state') and user_id in self._email_state:
+            del self._email_state[user_id]
+            cancelled.append("Email mode")
+
+        # Clear lookup state
+        if hasattr(self, '_lookup_state') and user_id in self._lookup_state:
+            del self._lookup_state[user_id]
+            cancelled.append("Lookup mode")
+
+        # Clear folder action state
+        if hasattr(self, '_folder_action_state') and user_id in self._folder_action_state:
+            del self._folder_action_state[user_id]
+            cancelled.append("Folder action mode")
+
+        if cancelled:
+            await update.message.reply_text(f"❌ Cancelled: {', '.join(cancelled)}")
+        else:
+            await update.message.reply_text("Nothing to cancel.")
 
     async def podcast_timeout(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Handle conversation timeout - clean up stale sessions."""
@@ -1925,6 +1981,7 @@ class KnowledgeBot:
             keyboard = [
                 [InlineKeyboardButton("✅ Approve & Save", callback_data="podcast_approve")],
                 [InlineKeyboardButton("✏️ More Feedback", callback_data="podcast_feedback")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="podcast_cancel")],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -2578,6 +2635,7 @@ def main():
     application.add_handler(CommandHandler("start", bot.start))
     application.add_handler(CommandHandler("help", bot.help_command))
     application.add_handler(CommandHandler("stats", bot.stats_command))
+    application.add_handler(CommandHandler("cancel", bot.cancel_command))
     application.add_handler(podcast_conv_handler)
     application.add_handler(CommandHandler("lookup", bot.lookup_command))
     application.add_handler(CommandHandler("organize", bot.organize_command))
@@ -2589,7 +2647,7 @@ def main():
 
     # Handle podcast approve/feedback callbacks (standalone, outside ConversationHandler)
     # This catches callbacks from AI-only mode where the conversation has ended
-    application.add_handler(CallbackQueryHandler(bot.podcast_review_standalone, pattern="^podcast_(approve|feedback)$"))
+    application.add_handler(CallbackQueryHandler(bot.podcast_review_standalone, pattern="^podcast_(approve|feedback|cancel)$"))
 
     # Handle saved summary actions (edit, email, back, done)
     application.add_handler(CallbackQueryHandler(bot.saved_action_callback, pattern="^saved_"))
