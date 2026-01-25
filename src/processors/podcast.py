@@ -419,11 +419,8 @@ class PodcastProcessor:
                     return entry
         return None
 
-    async def _get_episode_info_from_spotify(self, episode_id: str) -> tuple[str | None, str | None]:
-        """Get the episode title and show name from Spotify using oEmbed API.
-
-        Returns (episode_title, show_name) tuple.
-        """
+    async def _get_episode_title_from_spotify(self, episode_id: str) -> str | None:
+        """Get the episode title from Spotify using oEmbed API."""
         try:
             episode_url = f"https://open.spotify.com/episode/{episode_id}"
             oembed_url = f"https://open.spotify.com/oembed?url={episode_url}"
@@ -432,32 +429,12 @@ class PodcastProcessor:
                 if response.status_code == 200:
                     data = response.json()
                     title = data.get("title", "")
-                    # oEmbed returns the show name in the provider field or we can parse it from title
-                    # Title format is usually "Episode Title" but provider_name might have show info
-                    show_name = data.get("provider_name", "")
-                    # If provider is just "Spotify", try to get from html embed
-                    if show_name.lower() == "spotify" or not show_name:
-                        html = data.get("html", "")
-                        # Try to extract show name from the embed
-                        show_match = re.search(r'title="([^"]+)"', html)
-                        if show_match:
-                            # This might be "Episode Title • Show Name" format
-                            full_title = show_match.group(1)
-                            if " • " in full_title:
-                                parts = full_title.split(" • ")
-                                if len(parts) >= 2:
-                                    show_name = parts[-1]  # Show name is usually last
                     if title:
-                        logger.info(f"Got episode info from Spotify: '{title}' from '{show_name}'")
-                        return title, show_name if show_name and show_name.lower() != "spotify" else None
+                        logger.info(f"Got episode title from Spotify: {title}")
+                        return title
         except Exception as e:
-            logger.debug(f"Failed to get episode info from Spotify: {e}")
-        return None, None
-
-    async def _get_episode_title_from_spotify(self, episode_id: str) -> str | None:
-        """Get the episode title from Spotify using oEmbed API."""
-        title, _ = await self._get_episode_info_from_spotify(episode_id)
-        return title
+            logger.debug(f"Failed to get episode title from Spotify: {e}")
+        return None
 
     async def _download_from_spotify(self, url: str) -> tuple[Path, PodcastMetadata]:
         """Download from Spotify by finding the RSS feed or using yt-dlp."""
@@ -477,37 +454,22 @@ class PodcastProcessor:
             elif part == "episode" and i + 1 < len(path_parts):
                 episode_id = path_parts[i + 1].split("?")[0]
 
-        # Get episode title and show name for RSS matching if we have an episode ID
+        # Get episode title for RSS matching if we have an episode ID
         episode_title = None
-        episode_show_name = None
         if episode_id:
-            episode_title, episode_show_name = await self._get_episode_info_from_spotify(episode_id)
-            logger.info(f"Target episode: '{episode_title}' from show '{episode_show_name}'")
+            episode_title = await self._get_episode_title_from_spotify(episode_id)
+            logger.info(f"Target episode title from Spotify: {episode_title}")
 
         # Try to find RSS feed first
         if not show_id and episode_id:
             show_id = await self._get_show_id_from_episode(episode_id)
-            if not show_id:
-                logger.warning(f"Could not extract show ID from episode {episode_id}")
 
         rss_result = None
         rss_matched = False
-        rss_url = None
 
-        # Method 1: Try to find RSS via show_id
         if show_id:
             rss_url = await self._find_rss_from_spotify(show_id)
-
-        # Method 2: If no RSS and we have the show name from episode, search iTunes directly
-        if not rss_url and episode_show_name:
-            logger.info(f"Trying iTunes search with show name: {episode_show_name}")
-            rss_url = await self._find_real_rss_from_itunes(episode_show_name, None)
-            if rss_url and await self._rss_has_audio(rss_url):
-                logger.info(f"Found RSS via show name search: {rss_url}")
-            else:
-                rss_url = None
-
-        if rss_url:
+            if rss_url:
                 logger.info(f"Found RSS feed: {rss_url}")
                 try:
                     rss_result = await self._download_from_rss(rss_url, episode_title=episode_title)
@@ -589,23 +551,7 @@ class PodcastProcessor:
         try:
             episode_url = f"https://open.spotify.com/episode/{episode_id}"
             async with httpx.AsyncClient(timeout=15.0) as client:
-                # Method 1: Try oEmbed API first (most reliable, separate endpoint)
-                oembed_url = f"https://open.spotify.com/oembed?url={episode_url}"
-                try:
-                    oembed_response = await client.get(oembed_url, timeout=10.0)
-                    if oembed_response.status_code == 200:
-                        data = oembed_response.json()
-                        oembed_html = data.get("html", "")
-                        # oEmbed iframe contains the show URL
-                        show_match = re.search(r'/show/([a-zA-Z0-9]{22})', oembed_html)
-                        if show_match:
-                            show_id = show_match.group(1)
-                            logger.info(f"Extracted show ID from oEmbed: {show_id}")
-                            return show_id
-                except Exception as e:
-                    logger.debug(f"oEmbed lookup failed: {e}")
-
-                # Method 2: Fetch the episode page and look for show info in structured data
+                # Fetch the episode page - Spotify embeds show info in the HTML
                 response = await client.get(
                     episode_url,
                     follow_redirects=True,
@@ -620,51 +566,34 @@ class PodcastProcessor:
 
                 html = response.text
 
-                # Look for show link in JSON-LD script tags (structured data)
-                # These are more reliable than random links in the page
-                script_pattern = r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>'
-                for script_match in re.finditer(script_pattern, html, re.DOTALL | re.IGNORECASE):
-                    script_content = script_match.group(1)
-                    # Look for partOfSeries or similar containing the show URL
-                    show_match = re.search(r'open\.spotify\.com/show/([a-zA-Z0-9]{22})', script_content)
-                    if show_match:
-                        show_id = show_match.group(1)
-                        logger.info(f"Extracted show ID from JSON-LD: {show_id}")
-                        return show_id
+                # Look for show link in the HTML
+                # Pattern: /show/[show_id] appears in the page
+                show_pattern = r'/show/([a-zA-Z0-9]{22})'
+                match = re.search(show_pattern, html)
 
-                # Look for canonical or og:url meta tags pointing to the show
-                meta_pattern = r'<meta[^>]*property="og:see_also"[^>]*content="[^"]*show/([a-zA-Z0-9]{22})[^"]*"'
-                meta_match = re.search(meta_pattern, html, re.IGNORECASE)
-                if meta_match:
-                    show_id = meta_match.group(1)
-                    logger.info(f"Extracted show ID from meta tag: {show_id}")
+                if match:
+                    show_id = match.group(1)
+                    logger.info(f"Extracted show ID from episode page: {show_id}")
                     return show_id
 
-                # Look for "partOfSeries" in any script (common Spotify pattern)
-                series_pattern = r'"partOfSeries"[^}]*"url"\s*:\s*"[^"]*show/([a-zA-Z0-9]{22})"'
-                series_match = re.search(series_pattern, html)
-                if series_match:
-                    show_id = series_match.group(1)
-                    logger.info(f"Extracted show ID from partOfSeries: {show_id}")
-                    return show_id
-
-                # Fallback: Look for show URL in href attributes (links to the show page)
-                # This is more specific than a general regex on the whole page
-                href_pattern = r'href="[^"]*open\.spotify\.com/show/([a-zA-Z0-9]{22})[^"]*"'
-                href_match = re.search(href_pattern, html)
-                if href_match:
-                    show_id = href_match.group(1)
-                    logger.info(f"Extracted show ID from href: {show_id}")
-                    return show_id
+                # Try oEmbed API as fallback
+                oembed_url = f"https://open.spotify.com/oembed?url={episode_url}"
+                oembed_response = await client.get(oembed_url)
+                if oembed_response.status_code == 200:
+                    data = oembed_response.json()
+                    # The HTML in oEmbed might contain show link
+                    oembed_html = data.get("html", "")
+                    match = re.search(show_pattern, oembed_html)
+                    if match:
+                        return match.group(1)
 
         except Exception as e:
             logger.debug(f"Failed to get show ID from episode: {e}")
 
         return None
 
-    async def _get_podcast_info_from_spotify(self, show_id: str) -> tuple[str | None, str | None]:
-        """Get the podcast name and publisher from Spotify show page."""
-        logger.info(f"Getting podcast info for show: {show_id}")
+    async def _get_podcast_name_from_spotify(self, show_id: str) -> str | None:
+        """Get the podcast name from Spotify show page."""
         try:
             show_url = f"https://open.spotify.com/show/{show_id}"
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -675,65 +604,29 @@ class PodcastProcessor:
                         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
                     },
                 )
-                logger.debug(f"Spotify show page status: {response.status_code}")
                 if response.status_code == 200:
-                    html = response.text
-                    title = None
-                    publisher = None
-
-                    # Method 1: Get title from og:title meta tag (most reliable)
-                    og_title_match = re.search(r'<meta[^>]*property="og:title"[^>]*content="([^"]+)"', html)
-                    if not og_title_match:
-                        og_title_match = re.search(r'<meta[^>]*content="([^"]+)"[^>]*property="og:title"', html)
-                    if og_title_match:
-                        title = og_title_match.group(1)
-                        logger.debug(f"Got title from og:title: {title}")
-
-                    # Method 2: Fallback to <title> tag
-                    if not title:
-                        title_match = re.search(r'<title>([^<]+)</title>', html)
-                        if title_match:
-                            title = title_match.group(1)
-                            logger.debug(f"Got title from <title>: {title}")
-
-                    # Clean up title if we got one
-                    if title:
+                    # Look for the title in meta tags or og:title
+                    title_match = re.search(r'<title>([^<]+)</title>', response.text)
+                    if title_match:
+                        title = title_match.group(1)
                         # Clean up " | Podcast on Spotify" suffix
                         title = re.sub(r'\s*[|\-]\s*Podcast.*$', '', title, flags=re.IGNORECASE)
                         title = re.sub(r'\s*[|\-]\s*Spotify.*$', '', title, flags=re.IGNORECASE)
-                        title = title.strip()
-                        logger.info(f"Extracted podcast title: '{title}'")
-
-                    # Try to get publisher from JSON-LD or meta tags
-                    # Look for "creator" or "author" in structured data
-                    creator_match = re.search(r'"creator"\s*:\s*"([^"]+)"', html)
-                    if creator_match:
-                        publisher = creator_match.group(1)
-                        logger.debug(f"Got publisher from creator field: {publisher}")
-                    else:
-                        # Try og:site_name or similar
-                        site_match = re.search(r'content="([^"]+)"[^>]*property="og:site_name"', html)
-                        if not site_match:
-                            site_match = re.search(r'property="og:site_name"[^>]*content="([^"]+)"', html)
-                        if site_match and site_match.group(1).lower() != 'spotify':
-                            publisher = site_match.group(1)
-                            logger.debug(f"Got publisher from og:site_name: {publisher}")
-
-                    return title, publisher
-                else:
-                    logger.warning(f"Spotify show page returned: {response.status_code}")
+                        return title.strip()
         except Exception as e:
-            logger.warning(f"Failed to get podcast info: {e}")
-        return None, None
+            logger.debug(f"Failed to get podcast name: {e}")
+        return None
 
-    async def _find_real_rss_from_itunes(self, podcast_name: str, publisher: str = None) -> str | None:
-        """Search iTunes for the podcast and get the real RSS feed URL."""
+    async def _find_real_rss_from_itunes(self, podcast_name: str) -> str | None:
+        """Search iTunes for the podcast and get the real RSS feed URL.
+
+        Uses exact match first, then falls back to substring match.
+        This handles generic podcast names like "Empire" by preferring exact matches.
+        """
         try:
             search_url = "https://itunes.apple.com/search"
-            # Include publisher in search for better matching on generic names
-            search_term = f"{podcast_name} {publisher}" if publisher else podcast_name
             params = {
-                "term": search_term,
+                "term": podcast_name,
                 "entity": "podcast",
                 "limit": 10,
             }
@@ -744,7 +637,7 @@ class PodcastProcessor:
                     results = data.get("results", [])
                     podcast_lower = podcast_name.lower().strip()
 
-                    # Priority 1: Exact name match
+                    # Priority 1: Exact name match (handles generic names like "Empire")
                     for result in results:
                         name = result.get("collectionName", "").lower().strip()
                         feed_url = result.get("feedUrl")
@@ -752,22 +645,19 @@ class PodcastProcessor:
                             logger.info(f"Found exact RSS match: {feed_url}")
                             return feed_url
 
-                    # Priority 2: Publisher match (most reliable for generic names)
-                    if publisher:
-                        pub_lower = publisher.lower()
-                        for result in results:
-                            artist = result.get("artistName", "").lower()
-                            feed_url = result.get("feedUrl")
-                            if feed_url and pub_lower in artist:
-                                logger.info(f"Found RSS via publisher match: {feed_url}")
-                                return feed_url
-
-                    # Priority 3: Substring match
+                    # Priority 2: Substring match (podcast name appears in result)
                     for result in results:
                         name = result.get("collectionName", "").lower()
                         feed_url = result.get("feedUrl")
                         if feed_url and podcast_lower in name:
                             logger.info(f"Found RSS via substring: {feed_url}")
+                            return feed_url
+
+                    # Priority 3: First result with a feed (best guess)
+                    for result in results:
+                        feed_url = result.get("feedUrl")
+                        if feed_url:
+                            logger.info(f"Found RSS feed via iTunes (best guess): {feed_url}")
                             return feed_url
 
         except Exception as e:
@@ -776,46 +666,31 @@ class PodcastProcessor:
 
     async def _find_rss_from_spotify(self, show_id: str) -> str | None:
         """Try to find RSS feed for a Spotify show using various methods."""
-        logger.info(f"Finding RSS for Spotify show: {show_id}")
-
-        # Method 1: Get podcast name and publisher, search iTunes for the real RSS feed
+        # Method 1: Get podcast name and search iTunes for the real RSS feed
         # This is preferred because it gets the actual audio URLs
-        podcast_name, publisher = await self._get_podcast_info_from_spotify(show_id)
+        podcast_name = await self._get_podcast_name_from_spotify(show_id)
         if podcast_name:
-            logger.info(f"Got podcast info: '{podcast_name}' by '{publisher}'")
-            real_rss = await self._find_real_rss_from_itunes(podcast_name, publisher)
+            logger.info(f"Found podcast name: {podcast_name}")
+            real_rss = await self._find_real_rss_from_itunes(podcast_name)
             if real_rss:
-                logger.info(f"iTunes returned RSS: {real_rss}")
                 # Verify this RSS has audio enclosures
                 if await self._rss_has_audio(real_rss):
-                    logger.info(f"RSS verified to have audio: {real_rss}")
                     return real_rss
-                else:
-                    logger.warning(f"RSS has no audio enclosures: {real_rss}")
-            else:
-                logger.warning(f"iTunes search returned no RSS for: {podcast_name}")
-        else:
-            logger.warning(f"Could not get podcast name from Spotify show: {show_id}")
 
         # Method 2: Try spotifeed as fallback (but note: it often lacks audio URLs)
         spotifeed_url = f"https://spotifeed.timdorr.com/{show_id}"
-        logger.info(f"Trying spotifeed fallback: {spotifeed_url}")
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.head(spotifeed_url, follow_redirects=True)
                 if response.status_code == 200:
                     # Check if spotifeed actually has audio
                     if await self._rss_has_audio(spotifeed_url):
-                        logger.info(f"Spotifeed has audio, using: {spotifeed_url}")
                         return spotifeed_url
                     else:
                         logger.debug("Spotifeed has no audio URLs, skipping")
-                else:
-                    logger.debug(f"Spotifeed returned status: {response.status_code}")
         except Exception as e:
             logger.debug(f"Spotifeed lookup failed: {e}")
 
-        logger.warning(f"No RSS feed found for show: {show_id}")
         return None
 
     async def _rss_has_audio(self, feed_url: str) -> bool:
