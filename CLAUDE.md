@@ -199,6 +199,15 @@ AI-managed hierarchical folder organization for podcast summaries. Podcasts are 
 **Problem**: When given a Spotify show link (not episode), yt-dlp may match the wrong episode.
 **Solution**: Users should provide specific episode links. The bot extracts episode metadata from Spotify's page when possible.
 
+### iTunes Returns Wrong Podcast for Generic Names
+**Problem**: Podcasts with generic names like "Empire" can match the wrong podcast in iTunes search. For example, searching "Empire" returns "Empire: World History" before "Empire" (Blockworks), and substring matching (`"empire" in "empire: world history"`) matches the wrong one.
+**Solution**: iTunes matching now uses priority-based matching:
+1. **Exact match first**: `name == podcast_name` (case-insensitive)
+2. **Substring match**: `podcast_name in name`
+3. **Best guess**: First result with a feed URL
+
+**Important**: The Spotify show ID extraction uses a simple `/show/([a-zA-Z0-9]{22})` regex on the episode page HTML. This pattern is reliable and should NOT be over-complicated with multiple fallback methods - that approach was tried and broke all podcast resolution.
+
 ---
 
 ## Learning System
