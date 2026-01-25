@@ -566,24 +566,34 @@ class PodcastProcessor:
 
                 html = response.text
 
-                # Look for show link in the HTML
-                # Pattern: /show/[show_id] appears in the page
-                show_pattern = r'/show/([a-zA-Z0-9]{22})'
-                match = re.search(show_pattern, html)
-
+                # BEST: Look for spotify:show:XXXXX in JSON-LD data (most reliable)
+                # This is the canonical show URI embedded in structured data
+                spotify_uri_pattern = r'spotify:show:([a-zA-Z0-9]{22})'
+                match = re.search(spotify_uri_pattern, html)
                 if match:
                     show_id = match.group(1)
-                    logger.info(f"Extracted show ID from episode page: {show_id}")
+                    logger.info(f"Extracted show ID from spotify URI: {show_id}")
                     return show_id
 
-                # Try oEmbed API as fallback
+                # FALLBACK: Look for show link in meta tags or structured data
+                # Pattern like: "url":"https://open.spotify.com/show/XXXXX"
+                show_url_pattern = r'open\.spotify\.com/show/([a-zA-Z0-9]{22})'
+                match = re.search(show_url_pattern, html)
+                if match:
+                    show_id = match.group(1)
+                    logger.info(f"Extracted show ID from URL pattern: {show_id}")
+                    return show_id
+
+                # LAST RESORT: Try oEmbed API
                 oembed_url = f"https://open.spotify.com/oembed?url={episode_url}"
                 oembed_response = await client.get(oembed_url)
                 if oembed_response.status_code == 200:
                     data = oembed_response.json()
-                    # The HTML in oEmbed might contain show link
                     oembed_html = data.get("html", "")
-                    match = re.search(show_pattern, oembed_html)
+                    match = re.search(spotify_uri_pattern, oembed_html)
+                    if match:
+                        return match.group(1)
+                    match = re.search(show_url_pattern, oembed_html)
                     if match:
                         return match.group(1)
 
