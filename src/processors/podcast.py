@@ -602,8 +602,8 @@ class PodcastProcessor:
 
         return None
 
-    async def _get_podcast_name_from_spotify(self, show_id: str) -> str | None:
-        """Get the podcast name from Spotify show page."""
+    async def _get_podcast_info_from_spotify(self, show_id: str) -> tuple[str | None, str | None]:
+        """Get the podcast name and publisher from Spotify show page."""
         try:
             show_url = f"https://open.spotify.com/show/{show_id}"
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -615,48 +615,79 @@ class PodcastProcessor:
                     },
                 )
                 if response.status_code == 200:
-                    # Look for the title in meta tags or og:title
-                    title_match = re.search(r'<title>([^<]+)</title>', response.text)
+                    html = response.text
+                    title = None
+                    publisher = None
+
+                    # Get title from <title> tag
+                    title_match = re.search(r'<title>([^<]+)</title>', html)
                     if title_match:
                         title = title_match.group(1)
                         # Clean up " | Podcast on Spotify" suffix
                         title = re.sub(r'\s*[|\-]\s*Podcast.*$', '', title, flags=re.IGNORECASE)
                         title = re.sub(r'\s*[|\-]\s*Spotify.*$', '', title, flags=re.IGNORECASE)
-                        return title.strip()
-        except Exception as e:
-            logger.debug(f"Failed to get podcast name: {e}")
-        return None
+                        title = title.strip()
 
-    async def _find_real_rss_from_itunes(self, podcast_name: str) -> str | None:
+                    # Try to get publisher from JSON-LD or meta tags
+                    # Look for "creator" or "author" in structured data
+                    creator_match = re.search(r'"creator"\s*:\s*"([^"]+)"', html)
+                    if creator_match:
+                        publisher = creator_match.group(1)
+                    else:
+                        # Try og:site_name or similar
+                        site_match = re.search(r'content="([^"]+)"[^>]*property="og:site_name"', html)
+                        if not site_match:
+                            site_match = re.search(r'property="og:site_name"[^>]*content="([^"]+)"', html)
+                        if site_match and site_match.group(1).lower() != 'spotify':
+                            publisher = site_match.group(1)
+
+                    return title, publisher
+        except Exception as e:
+            logger.debug(f"Failed to get podcast info: {e}")
+        return None, None
+
+    async def _find_real_rss_from_itunes(self, podcast_name: str, publisher: str = None) -> str | None:
         """Search iTunes for the podcast and get the real RSS feed URL."""
         try:
-            # Search iTunes for the podcast
             search_url = "https://itunes.apple.com/search"
+            # Include publisher in search for better matching on generic names
+            search_term = f"{podcast_name} {publisher}" if publisher else podcast_name
             params = {
-                "term": podcast_name,
+                "term": search_term,
                 "entity": "podcast",
-                "limit": 5,
+                "limit": 10,
             }
             async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.get(search_url, params=params)
                 if response.status_code == 200:
                     data = response.json()
                     results = data.get("results", [])
+                    podcast_lower = podcast_name.lower().strip()
 
-                    # Find the best match
+                    # Priority 1: Exact name match
+                    for result in results:
+                        name = result.get("collectionName", "").lower().strip()
+                        feed_url = result.get("feedUrl")
+                        if feed_url and name == podcast_lower:
+                            logger.info(f"Found exact RSS match: {feed_url}")
+                            return feed_url
+
+                    # Priority 2: Publisher match (most reliable for generic names)
+                    if publisher:
+                        pub_lower = publisher.lower()
+                        for result in results:
+                            artist = result.get("artistName", "").lower()
+                            feed_url = result.get("feedUrl")
+                            if feed_url and pub_lower in artist:
+                                logger.info(f"Found RSS via publisher match: {feed_url}")
+                                return feed_url
+
+                    # Priority 3: Substring match
                     for result in results:
                         name = result.get("collectionName", "").lower()
                         feed_url = result.get("feedUrl")
-
-                        if feed_url and podcast_name.lower() in name:
-                            logger.info(f"Found real RSS feed via iTunes: {feed_url}")
-                            return feed_url
-
-                    # If no exact match, return first result with a feed
-                    for result in results:
-                        feed_url = result.get("feedUrl")
-                        if feed_url:
-                            logger.info(f"Found RSS feed via iTunes (best guess): {feed_url}")
+                        if feed_url and podcast_lower in name:
+                            logger.info(f"Found RSS via substring: {feed_url}")
                             return feed_url
 
         except Exception as e:
@@ -665,12 +696,12 @@ class PodcastProcessor:
 
     async def _find_rss_from_spotify(self, show_id: str) -> str | None:
         """Try to find RSS feed for a Spotify show using various methods."""
-        # Method 1: Get podcast name and search iTunes for the real RSS feed
+        # Method 1: Get podcast name and publisher, search iTunes for the real RSS feed
         # This is preferred because it gets the actual audio URLs
-        podcast_name = await self._get_podcast_name_from_spotify(show_id)
+        podcast_name, publisher = await self._get_podcast_info_from_spotify(show_id)
         if podcast_name:
-            logger.info(f"Found podcast name: {podcast_name}")
-            real_rss = await self._find_real_rss_from_itunes(podcast_name)
+            logger.info(f"Found podcast: {podcast_name} by {publisher}")
+            real_rss = await self._find_real_rss_from_itunes(podcast_name, publisher)
             if real_rss:
                 # Verify this RSS has audio enclosures
                 if await self._rss_has_audio(real_rss):
